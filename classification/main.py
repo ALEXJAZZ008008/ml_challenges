@@ -32,17 +32,17 @@ conv_bool = True
 deep_bool = True
 alex_bool = True
 dense_layers = 4
-filters = [128, 256, 512, 1024]
-conv_layers = [2, 2, 2, 2]
-num_heads = None
-key_dim = None
+filters = [64, 128, 256, 512, 1024]
+conv_layers = [2, 2, 2, 2, 2]
+num_heads = 4
+key_dim = filters[-1]
 
 learning_rate = 1e-04
 weight_decay = 0.0
 
 gradient_accumulation_bool = False
 
-epochs = 8
+epochs = 1
 min_batch_size = 32
 
 if gradient_accumulation_bool:
@@ -66,7 +66,7 @@ max_angle = 45.0
 translate_bool = True
 translate_proportion = 0.25
 
-test_batch_size = 2048
+test_batch_size = min_batch_size
 
 
 def mkdir_p(path):
@@ -504,23 +504,20 @@ def get_model_conv(x_train, y_train):
             x = tf.keras.layers.Conv2D(filters=filters[i],
                                        kernel_size=(3, 3),
                                        strides=(1, 1),
-                                       padding="same",
-                                       dilation_rate=1)(x)
+                                       padding="same")(x)
             x = tf.keras.layers.Lambda(tf.keras.activations.relu)(x)
 
         x = tf.keras.layers.Conv2D(filters=filters[i],
                                    kernel_size=(3, 3),
                                    strides=(2, 2),
-                                   padding="same",
-                                   dilation_rate=1)(x)
+                                   padding="same")(x)
         x = tf.keras.layers.Lambda(tf.keras.activations.relu)(x)
 
     for j in range(conv_layers[-1]):
         x = tf.keras.layers.Conv2D(filters=filters[-1],
                                    kernel_size=(3, 3),
                                    strides=(1, 1),
-                                   padding="same",
-                                   dilation_rate=1)(x)
+                                   padding="same")(x)
         x = tf.keras.layers.Lambda(tf.keras.activations.relu)(x)
 
     x = tf.keras.layers.Flatten()(x)
@@ -549,17 +546,15 @@ def get_model_conv_alex(x_train, y_train):
 
     x_input = tf.keras.Input(shape=input_shape)
 
-    x = x_input
-
     x = tf.keras.layers.Conv2D(filters=filters[0],
                                kernel_size=(7, 7),
                                strides=(1, 1),
                                padding="same",
-                               dilation_rate=1,
-                               kernel_initializer=tf.keras.initializers.he_uniform)(x)
-    x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
+                               kernel_initializer=tf.keras.initializers.orthogonal)(x_input)
 
-    for i in range(len(filters) - 1):
+    filters_len = len(filters)
+
+    for i in range(filters_len - 1):
         x_res = x
 
         for j in range(conv_layers[i]):
@@ -567,50 +562,40 @@ def get_model_conv_alex(x_train, y_train):
                                        kernel_size=(3, 3),
                                        strides=(1, 1),
                                        padding="same",
-                                       dilation_rate=1,
-                                       kernel_initializer=tf.keras.initializers.he_uniform)(x)
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x)
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
         x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                        kernel_size=(1, 1),
                                        strides=(1, 1),
                                        padding="same",
-                                       dilation_rate=1,
-                                       kernel_initializer=tf.keras.initializers.he_uniform)(x_res)
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-        x = tf.keras.layers.Conv2D(filters=filters[i],
-                                   kernel_size=(3, 3),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   dilation_rate=1,
-                                   kernel_initializer=tf.keras.initializers.he_uniform)(x)
         x = tf.keras.layers.Lambda(einops.rearrange,
                                    arguments={"pattern": "b (h h1) (w w1) c -> b h w (c h1 w1)", "h1": 2, "w1": 2})(x)
 
     x_res = x
 
-    for j in range(conv_layers[-1]):
+    for i in range(conv_layers[-1]):
         x = tf.keras.layers.Conv2D(filters=filters[-1],
                                    kernel_size=(3, 3),
                                    strides=(1, 1),
                                    padding="same",
-                                   dilation_rate=1,
-                                   kernel_initializer=tf.keras.initializers.he_uniform)(x)
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
     x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                    kernel_size=(1, 1),
                                    strides=(1, 1),
                                    padding="same",
-                                   dilation_rate=1,
-                                   kernel_initializer=tf.keras.initializers.he_uniform)(x_res)
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
     x = tf.keras.layers.Add()([x, x_res])
 
     if num_heads is not None and key_dim is not None:
         x = tf.keras.layers.MultiHeadAttention(num_heads=num_heads,
                                                key_dim=key_dim,
-                                               kernel_initializer=tf.keras.initializers.he_uniform)(x, x)
+                                               kernel_initializer=tf.keras.initializers.orthogonal)(x, x)
 
     x = tf.keras.layers.GlobalAvgPool2D()(x)
 
