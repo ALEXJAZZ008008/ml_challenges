@@ -19,6 +19,9 @@ import tensorflow_datasets as tfds
 import pickle
 
 
+np.seterr(all="print")
+
+
 dataset_name = "cifar10"
 output_path = "../output/classification/"
 
@@ -35,7 +38,6 @@ dense_layers = 4
 filters = [64, 128, 256, 512, 1024]
 conv_layers = [2, 2, 2, 2, 2]
 num_heads = 4
-key_dim = filters[-1]
 
 learning_rate = 1e-04
 weight_decay = 0.0
@@ -131,6 +133,9 @@ def get_input():
     y_train = np.array(y_train)
     y_test = np.array(y_test)
 
+    y_train = np.expand_dims(y_train, axis=-1)
+    y_test = np.expand_dims(y_test, axis=-1)
+
     return x_train, x_test, y_train, y_test
 
 
@@ -200,32 +205,16 @@ def rescale_images_list(images):
     for i in range(images_len):
         image = get_data_from_storage(images[i])
 
-        image = rescale(image, output_dimension_size / np.max(image.shape[:-1]), mode="constant", clip=False,
-                        preserve_range=True, channel_axis=-1)
+        image = rescale(image, output_dimension_size / np.max(image.shape[:-1]), order=3, preserve_range=True,
+                        channel_axis=-1)
 
         images[i] = set_data_from_storage(image, images[i])
 
     return images
 
 
-def pad_image(image, output_dimension_size):
-    while image.shape[0] + 1 < output_dimension_size:
-        image = np.pad(image, ((1, 1), (0, 0), (0, 0)))  # noqa
-
-    if image.shape[0] < output_dimension_size:
-        image = np.pad(image, ((0, 1), (0, 0), (0, 0)))  # noqa
-
-    while image.shape[1] + 1 < output_dimension_size:
-        image = np.pad(image, ((0, 0), (1, 1), (0, 0)))  # noqa
-
-    if image.shape[1] < output_dimension_size:
-        image = np.pad(image, ((0, 0), (0, 1), (0, 0)))  # noqa
-
-    return image
-
-
 def normalise_images_list(x_train, x_test):
-    print("normalise_images_list")
+    print("normalise_images")
 
     standard_scaler = StandardScaler()
 
@@ -255,6 +244,22 @@ def normalise_images_list(x_train, x_test):
     return x_train, x_test
 
 
+def pad_image(image, output_dimension_size):
+    while image.shape[0] + 1 < output_dimension_size:
+        image = np.pad(image, ((1, 1), (0, 0), (0, 0)))  # noqa
+
+    if image.shape[0] < output_dimension_size:
+        image = np.pad(image, ((0, 1), (0, 0), (0, 0)))  # noqa
+
+    while image.shape[1] + 1 < output_dimension_size:
+        image = np.pad(image, ((0, 0), (1, 1), (0, 0)))  # noqa
+
+    if image.shape[1] < output_dimension_size:
+        image = np.pad(image, ((0, 0), (0, 1), (0, 0)))  # noqa
+
+    return image
+
+
 def pad_images_list(images):
     print("pad_images")
 
@@ -281,7 +286,7 @@ def pad_images_list(images):
 
 
 def convert_images_to_tensor_list(images):
-    print("convert_images_to_tensor_list")
+    print("convert_images_to_tensor")
 
     for i in range(len(images)):
         image = get_data_from_storage(images[i])
@@ -323,8 +328,8 @@ def rescale_images_array(images):
     rescaled_images = []
 
     for i in range(len(images)):
-        rescaled_images.append(rescale(images[i], output_dimension_size / max_dimension_size, mode="constant",
-                                       clip=False, preserve_range=True, channel_axis=-1))
+        rescaled_images.append(rescale(images[i], output_dimension_size / max_dimension_size, order=3,
+                                       preserve_range=True, channel_axis=-1))
 
     images = np.array(rescaled_images)
 
@@ -332,7 +337,7 @@ def rescale_images_array(images):
 
 
 def normalise_images_array(x_train, x_test):
-    print("normalise_images_array")
+    print("normalise_images")
 
     standard_scaler = StandardScaler()
 
@@ -572,8 +577,14 @@ def get_model_conv_alex(x_train, y_train):
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-        x = tf.keras.layers.Lambda(einops.rearrange,
-                                   arguments={"pattern": "b (h h1) (w w1) c -> b h w (c h1 w1)", "h1": 2, "w1": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b (h1 h2) (w1 w2) c -> b h1 w1 (c h2 w2)",
+                                                                "h2": 2,
+                                                                "w2": 2})(x)
 
     x_res = x
 
@@ -585,31 +596,31 @@ def get_model_conv_alex(x_train, y_train):
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-    x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
-    x = tf.keras.layers.Add()([x, x_res])
+        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                       kernel_size=(1, 1),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+        x = tf.keras.layers.Add()([x, x_res])
 
-    if num_heads is not None and key_dim is not None:
+    if num_heads is not None:
         x = tf.keras.layers.MultiHeadAttention(num_heads=num_heads,
-                                               key_dim=key_dim,
+                                               key_dim=x.shape[-1],
                                                kernel_initializer=tf.keras.initializers.orthogonal)(x, x)
 
     x = tf.keras.layers.GlobalAvgPool2D()(x)
 
     x = tf.keras.layers.Dense(units=get_next_geometric_value(x.shape[-1], 2.0),
-                              kernel_initializer=tf.keras.initializers.he_uniform)(x)
+                              kernel_initializer=tf.keras.initializers.orthogonal)(x)
     x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
     for i in range(dense_layers - 1):
         x = tf.keras.layers.Dense(units=get_previous_geometric_value(x.shape[-1] - 1, 2.0),
-                                  kernel_initializer=tf.keras.initializers.he_uniform)(x)
+                                  kernel_initializer=tf.keras.initializers.orthogonal)(x)
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
     x = tf.keras.layers.Dense(units=y_train.shape[-1],
-                              kernel_initializer=tf.keras.initializers.he_uniform)(x)
+                              kernel_initializer=tf.keras.initializers.orthogonal)(x)
     x = tf.keras.layers.Lambda(tf.keras.activations.softmax)(x)
 
     model = tf.keras.Model(inputs=[x_input],
@@ -728,8 +739,7 @@ def augmentation(image):
                              preserve_range=True, channel_axis=1)
 
     if scale_bool:
-        image = rescale(image, random.uniform(min_scale, max_scale), mode="constant", clip=False, preserve_range=True,
-                        channel_axis=-1)
+        image = rescale(image, random.uniform(min_scale, max_scale), order=3, preserve_range=True, channel_axis=-1)
 
     if rotate_bool:
         image = scipy.ndimage.rotate(image, angle=random.uniform(min_angle, max_angle), axes=(0, 1), order=1)
@@ -790,17 +800,18 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
             accuracies = []
 
             for m in range(current_batch_size):
-                current_x_train = get_data_from_storage(x_train[current_index])
+                current_x_train = get_data_from_storage(x_train[indices[current_index]])
 
                 current_x_train = augmentation(current_x_train)
-                y_true = y_train[current_index]
+                y_true = y_train[indices[current_index]]
 
                 current_x_train = tf.expand_dims(current_x_train, axis=0)
 
                 with tf.GradientTape() as tape:
                     y_pred = model([current_x_train], training=True)
 
-                    loss = get_loss(y_true, y_pred)
+                    loss = tf.math.reduce_sum([get_loss(y_true, y_pred),
+                                               tf.math.reduce_sum(model.losses)])
 
                 gradients = tape.gradient(loss, model.trainable_weights)
 
@@ -819,7 +830,7 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
             loss = tf.math.reduce_mean(losses)
             accuracy = tf.math.reduce_mean(accuracies)
 
-            print("Epoch: {0:3}/{1:3} Batch size: {2:6} Iteration: {3:6}/{4:6} Loss: {5:12} Accuracy: {6:6}%".format(
+            print("Epoch: {0:3}/{1:3} Batch size: {2:6} Iteration: {3:6}/{4:6} Loss: {5:14} Accuracy: {6:14}%".format(
                 str(i + 1), str(epochs), str(current_batch_size), str(j + 1), str(iterations), str(loss.numpy()),
                 str(accuracy.numpy())))
 
@@ -854,10 +865,10 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train, y_train):
             y_true = []
 
             for k in range(current_batch_size):
-                current_x_train = get_data_from_storage(x_train[current_index])
+                current_x_train = get_data_from_storage(x_train[indices[current_index]])
 
                 current_x_train_list.append(augmentation(current_x_train))
-                y_true.append(y_train[current_index])
+                y_true.append(y_train[indices[current_index]])
 
                 current_index = current_index + 1
 
@@ -867,7 +878,8 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train, y_train):
             with tf.GradientTape() as tape:
                 y_pred = model([current_x_train_list], training=True)
 
-                loss = get_loss(y_true, y_pred)
+                loss = tf.math.reduce_sum([get_loss(y_true, y_pred),
+                                           tf.math.reduce_sum(model.losses)])
 
             gradients = tape.gradient(loss, model.trainable_weights)
             gradients, _ = tf.clip_by_global_norm(gradients, 1.0)
@@ -875,7 +887,7 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train, y_train):
 
             accuracy = get_accuracy(y_true, y_pred)
 
-            print("Epoch: {0:3}/{1:3} Batch size: {2:6} Iteration: {3:6}/{4:6} Loss: {5:12} Accuracy: {6:6}%".format(
+            print("Epoch: {0:3}/{1:3} Batch size: {2:6} Iteration: {3:6}/{4:6} Loss: {5:14} Accuracy: {6:14}%".format(
                 str(i + 1), str(epochs), str(current_batch_size), str(j + 1), str(iterations), str(loss.numpy()),
                 str(accuracy.numpy())))
 
@@ -913,7 +925,7 @@ def test(model, x_test, y_test):
     loss = tf.math.reduce_mean(losses)
     accuracy = tf.math.reduce_mean(accuracies)
 
-    print("Loss: {0:12} Accuracy: {1:6}%".format(str(loss.numpy()), str(accuracy.numpy())))
+    print("Loss: {0:14} Accuracy: {1:14}%".format(str(loss.numpy()), str(accuracy.numpy())))
 
     return model
 
