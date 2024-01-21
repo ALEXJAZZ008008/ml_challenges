@@ -1,4 +1,4 @@
-# Copyright University College London 2023
+# Copyright University College London 2023, 2024
 # Author: Alexander C. Whitehead, Department of Computer Science, UCL
 # For internal research only.
 
@@ -16,6 +16,7 @@ from sklearn.preprocessing import StandardScaler, OneHotEncoder
 import einops
 import tensorflow as tf
 import tensorflow_datasets as tfds
+import tensorflow_models as tfm
 import pickle
 
 
@@ -29,6 +30,7 @@ read_data_from_storage_bool = False
 
 preprocess_list_bool = False
 convert_rgb_to_greyscale_bool = False
+min_output_dimension_size = None
 max_output_dimension_size = None
 
 conv_bool = True
@@ -38,19 +40,29 @@ dense_layers = 4
 filters = [64, 128, 256, 512, 1024]
 conv_layers = [2, 2, 2, 2, 2]
 num_heads = 4
+key_dim = 32
 
 learning_rate = 1e-04
-weight_decay = 0.0
+
+if alex_bool:
+    weight_decay = 0.0
+else:
+    weight_decay = 0.0
 
 gradient_accumulation_bool = False
 
 epochs = 1
-min_batch_size = 32
 
 if gradient_accumulation_bool:
-    max_batch_size = None
-else:
+    min_batch_size = 32
     max_batch_size = 32
+else:
+    if alex_bool:
+        min_batch_size = 32
+        max_batch_size = 32
+    else:
+        min_batch_size = 32
+        max_batch_size = 32
 
 axis_zero_flip_bool = False
 axis_one_flip_bool = False
@@ -198,6 +210,10 @@ def rescale_images_list(images):
 
     output_dimension_size = get_next_geometric_value(max_dimension_size, 2.0)
 
+    if min_output_dimension_size is not None:
+        if output_dimension_size < min_output_dimension_size:
+            output_dimension_size = min_output_dimension_size
+
     if max_output_dimension_size is not None:
         if output_dimension_size > max_output_dimension_size:
             output_dimension_size = max_output_dimension_size
@@ -321,8 +337,12 @@ def rescale_images_array(images):
     max_dimension_size = np.max(images.shape[1:-1])
     output_dimension_size = get_next_geometric_value(max_dimension_size, 2.0)
 
+    if min_output_dimension_size is not None:
+        if output_dimension_size < min_output_dimension_size:
+            output_dimension_size = min_output_dimension_size
+
     if max_output_dimension_size is not None:
-        if output_dimension_size > max_output_dimension_size:
+        if output_dimension_size > max_output_dimension_size:  # noqa
             output_dimension_size = max_output_dimension_size
 
     rescaled_images = []
@@ -427,9 +447,9 @@ def get_model_dense(x_train, y_train):
     if read_data_from_storage_bool:
         current_x_train_images = get_data_from_storage(x_train[0])
 
-        input_shape = current_x_train_images.shape
+        input_shape = list(current_x_train_images.shape)
     else:
-        input_shape = x_train.shape[1:]
+        input_shape = list(x_train.shape[1:])
 
     x_input = tf.keras.Input(shape=input_shape)
 
@@ -464,9 +484,9 @@ def get_model_deep_dense(x_train, y_train):
     if read_data_from_storage_bool:
         current_x_train_images = get_data_from_storage(x_train[0])
 
-        input_shape = current_x_train_images.shape
+        input_shape = list(current_x_train_images.shape)
     else:
-        input_shape = x_train.shape[1:]
+        input_shape = list(x_train.shape[1:])
 
     x_input = tf.keras.Input(shape=input_shape)
 
@@ -496,9 +516,9 @@ def get_model_conv(x_train, y_train):
     if read_data_from_storage_bool:
         current_x_train_images = get_data_from_storage(x_train[0])
 
-        input_shape = current_x_train_images.shape
+        input_shape = list(current_x_train_images.shape)
     else:
-        input_shape = x_train.shape[1:]
+        input_shape = list(x_train.shape[1:])
 
     x_input = tf.keras.Input(shape=input_shape)
 
@@ -545,9 +565,9 @@ def get_model_conv_alex(x_train, y_train):
     if read_data_from_storage_bool:
         current_x_train_images = get_data_from_storage(x_train[0])
 
-        input_shape = current_x_train_images.shape
+        input_shape = list(current_x_train_images.shape)
     else:
-        input_shape = x_train.shape[1:]
+        input_shape = list(x_train.shape[1:])
 
     x_input = tf.keras.Input(shape=input_shape)
 
@@ -604,9 +624,44 @@ def get_model_conv_alex(x_train, y_train):
         x = tf.keras.layers.Add()([x, x_res])
 
     if num_heads is not None:
-        x = tf.keras.layers.MultiHeadAttention(num_heads=num_heads,
-                                               key_dim=x.shape[-1],
-                                               kernel_initializer=tf.keras.initializers.orthogonal)(x, x)
+        x_res = x
+
+        x = tf.keras.layers.GroupNormalization(groups=1,
+                                               center=False,
+                                               scale=False)(x)
+
+        x_shape = x.shape
+        x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
+        x = tf.keras.layers.Reshape(target_shape=(x_shape_prod, x_shape[-1]))(x)
+        x = (tfm.nlp.layers.KernelAttention(num_heads=num_heads,
+                                            key_dim=key_dim,
+                                            kernel_initializer=tf.keras.initializers.orthogonal,
+                                            feature_transform="elu")(x, x))
+        x = tf.keras.layers.Reshape(target_shape=x_shape[1:])(x)
+
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(1, 1),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.Add()([x_res, x])
+
+        x_res = x
+
+        for j in range(conv_layers[-1]):
+            x = tf.keras.layers.Conv2D(filters=filters[-1],
+                                       kernel_size=(3, 3),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x)
+            x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
+
+        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                       kernel_size=(1, 1),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+        x = tf.keras.layers.Add()([x, x_res])
 
     x = tf.keras.layers.GlobalAvgPool2D()(x)
 

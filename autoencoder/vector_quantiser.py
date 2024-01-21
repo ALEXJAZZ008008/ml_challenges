@@ -1,4 +1,4 @@
-# Copyright University College London 2023
+# Copyright University College London 2023, 2024
 # Author: Alexander C. Whitehead, Department of Computer Science, UCL
 # For internal research only.
 
@@ -10,6 +10,7 @@ import tensorflow as tf
 class VectorQuantiser(tf.keras.layers.Layer):
     def __init__(self, embedding_dim, num_embeddings, **kwargs):
         super().__init__(**kwargs)
+
         self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
 
