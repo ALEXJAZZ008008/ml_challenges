@@ -17,13 +17,14 @@ import einops
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import tensorflow_models as tfm
+from standardiser import Standardiser
 import pickle
 
 
 np.seterr(all="print")
 
 
-dataset_name = "cifar10"
+dataset_name = "mnist"
 output_path = "../output/classification/"
 
 read_data_from_storage_bool = False
@@ -42,12 +43,14 @@ conv_layers = [2, 2, 2, 2, 2]
 num_heads = 4
 key_dim = 32
 
-learning_rate = 1e-04
-
 if alex_bool:
+    learning_rate = 1e-04
     weight_decay = 0.0
+    ema_overwrite_frequency = None
 else:
+    learning_rate = 1e-04
     weight_decay = 0.0
+    ema_overwrite_frequency = None
 
 gradient_accumulation_bool = False
 
@@ -626,9 +629,7 @@ def get_model_conv_alex(x_train, y_train):
     if num_heads is not None:
         x_res = x
 
-        x = tf.keras.layers.GroupNormalization(groups=1,
-                                               center=False,
-                                               scale=False)(x)
+        x = Standardiser()(x)
 
         x_shape = x.shape
         x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
@@ -1012,7 +1013,8 @@ def main():
 
     optimiser = tf.keras.optimizers.Adam(learning_rate=learning_rate,
                                          weight_decay=weight_decay,
-                                         use_ema=True)
+                                         use_ema=True,
+                                         ema_overwrite_frequency=ema_overwrite_frequency)
 
     batch_sizes, batch_sizes_epochs = get_batch_sizes(x_train)
 

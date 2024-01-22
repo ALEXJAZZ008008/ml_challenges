@@ -68,8 +68,12 @@ gradient_accumulation_bool = False
 epochs = 256
 
 if gradient_accumulation_bool:
-    min_batch_size = 32
-    max_batch_size = 32
+    if alex_bool:
+        min_batch_size = 32
+        max_batch_size = 32
+    else:
+        min_batch_size = 16
+        max_batch_size = 16
 else:
     if alex_bool:
         min_batch_size = 32
@@ -479,7 +483,7 @@ def preprocess_labels(x_train_labels, x_test_labels):
     return x_train_labels, x_test_labels
 
 
-def preprocess_input(x_train_images, x_test_images, x_positional_encodings, x_train_labels, x_test_labels):
+def preprocess_input(x_train_images, x_test_images, x_timestep_encodings, x_train_labels, x_test_labels):
     print("preprocess_input")
 
     if greyscale_bool:
@@ -491,11 +495,11 @@ def preprocess_input(x_train_images, x_test_images, x_positional_encodings, x_tr
     else:
         x_train_images, x_test_images, standard_scaler = preprocess_images_array(x_train_images, x_test_images)
 
-    x_positional_encodings = preprocess_positional_encodings(x_positional_encodings)
+    x_timestep_encodings = preprocess_positional_encodings(x_timestep_encodings)
 
     x_train_labels, x_test_labels = preprocess_labels(x_train_labels, x_test_labels)
 
-    return x_train_images, x_test_images, standard_scaler, x_positional_encodings, x_train_labels, x_test_labels
+    return x_train_images, x_test_images, standard_scaler, x_timestep_encodings, x_train_labels, x_test_labels
 
 
 def get_previous_geometric_value(an, a0):
@@ -507,18 +511,18 @@ def get_previous_geometric_value(an, a0):
     return an
 
 
-def get_model_conv(x_train_images, x_positional_encodings, x_train_labels):
+def get_model_conv(x_train_images, x_timestep_encodings, x_train_labels):
     print("get_model")
 
     if read_data_from_storage_bool:
         current_x_train_images = get_data_from_storage(x_train_images[0])
 
-        input_shape = list(current_x_train_images.shape)
+        image_input_shape = list(current_x_train_images.shape)
     else:
-        input_shape = list(x_train_images.shape[1:])
+        image_input_shape = list(x_train_images.shape[1:])
 
-    x_input = tf.keras.Input(shape=input_shape)
-    x_positional_encoding_input = tf.keras.Input(shape=x_positional_encodings.shape[1:])
+    x_input = tf.keras.Input(shape=image_input_shape)
+    x_timestep_encoding_input = tf.keras.Input(shape=x_timestep_encodings.shape[1:])
     x_label_input = tf.keras.Input(shape=x_train_labels.shape[1:])
 
     x = x_input
@@ -536,10 +540,10 @@ def get_model_conv(x_train_images, x_positional_encodings, x_train_labels):
                                strides=(1, 1),
                                padding="same")(x)
 
-    x_positional_encoding = x_positional_encoding_input
-    x_positional_encoding = tf.keras.layers.Dense(units=filters[-1])(x_positional_encoding)
-    x_positional_encoding = tf.keras.layers.Lambda(tf.keras.activations.gelu)(x_positional_encoding)
-    x_positional_encoding = tf.keras.layers.Dense(units=filters[-1])(x_positional_encoding)
+    x_timestep_encoding = x_timestep_encoding_input
+    x_timestep_encoding = tf.keras.layers.Dense(units=filters[-1])(x_timestep_encoding)
+    x_timestep_encoding = tf.keras.layers.Lambda(tf.keras.activations.gelu)(x_timestep_encoding)
+    x_timestep_encoding = tf.keras.layers.Dense(units=filters[-1])(x_timestep_encoding)
 
     filters_len = len(filters)
 
@@ -558,19 +562,18 @@ def get_model_conv(x_train_images, x_positional_encodings, x_train_labels):
 
         x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_positional_encoding_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
-        x_positional_encoding_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_positional_encoding)
-        x_positional_encoding_beta_gamma = (tf.keras.layers.Dense(units=x_positional_encoding_beta_gamma_units)
-                                            (x_positional_encoding_beta_gamma))
+        x_timestep_encoding_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_timestep_encoding_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_timestep_encoding)
+        x_timestep_encoding_beta_gamma = (tf.keras.layers.Dense(units=x_timestep_encoding_beta_gamma_units)
+                                          (x_timestep_encoding_beta_gamma))
 
-        x_positional_encoding_gamma = x_positional_encoding_beta_gamma[:, :x.shape[-1]]
-        x_positional_encoding_gamma = (
-            tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_positional_encoding_gamma))
+        x_timestep_encoding_gamma = x_timestep_encoding_beta_gamma[:, :x.shape[-1]]
+        x_timestep_encoding_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_timestep_encoding_gamma)
 
-        x_positional_encoding_beta = x_positional_encoding_beta_gamma[:, x.shape[-1]:]
+        x_timestep_encoding_beta = x_timestep_encoding_beta_gamma[:, x.shape[-1]:]
 
-        x = tf.keras.layers.Multiply()([x, x_positional_encoding_gamma])
-        x = tf.keras.layers.Add()([x, x_positional_encoding_beta])
+        x = tf.keras.layers.Multiply()([x, x_timestep_encoding_gamma])
+        x = tf.keras.layers.Add()([x, x_timestep_encoding_beta])
 
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
@@ -600,19 +603,18 @@ def get_model_conv(x_train_images, x_positional_encodings, x_train_labels):
 
         x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_positional_encoding_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
-        x_positional_encoding_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_positional_encoding)
-        x_positional_encoding_beta_gamma = tf.keras.layers.Dense(units=x_positional_encoding_beta_gamma_units)(
-            x_positional_encoding_beta_gamma)
+        x_timestep_encoding_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_timestep_encoding_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_timestep_encoding)
+        x_timestep_encoding_beta_gamma = (tf.keras.layers.Dense(units=x_timestep_encoding_beta_gamma_units)
+                                          (x_timestep_encoding_beta_gamma))
 
-        x_positional_encoding_gamma = x_positional_encoding_beta_gamma[:, :x.shape[-1]]
-        x_positional_encoding_gamma = (
-            tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_positional_encoding_gamma))
+        x_timestep_encoding_gamma = x_timestep_encoding_beta_gamma[:, :x.shape[-1]]
+        x_timestep_encoding_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_timestep_encoding_gamma)
 
-        x_positional_encoding_beta = x_positional_encoding_beta_gamma[:, x.shape[-1]:]
+        x_timestep_encoding_beta = x_timestep_encoding_beta_gamma[:, x.shape[-1]:]
 
-        x = tf.keras.layers.Multiply()([x, x_positional_encoding_gamma])
-        x = tf.keras.layers.Add()([x, x_positional_encoding_beta])
+        x = tf.keras.layers.Multiply()([x, x_timestep_encoding_gamma])
+        x = tf.keras.layers.Add()([x, x_timestep_encoding_beta])
 
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
@@ -674,19 +676,18 @@ def get_model_conv(x_train_images, x_positional_encodings, x_train_labels):
 
     x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-    x_positional_encoding_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
-    x_positional_encoding_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_positional_encoding)
-    x_positional_encoding_beta_gamma = tf.keras.layers.Dense(units=x_positional_encoding_beta_gamma_units)(
-        x_positional_encoding_beta_gamma)
+    x_timestep_encoding_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+    x_timestep_encoding_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_timestep_encoding)
+    x_timestep_encoding_beta_gamma = (tf.keras.layers.Dense(units=x_timestep_encoding_beta_gamma_units)
+                                      (x_timestep_encoding_beta_gamma))
 
-    x_positional_encoding_gamma = x_positional_encoding_beta_gamma[:, :x.shape[-1]]
-    x_positional_encoding_gamma = (
-        tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_positional_encoding_gamma))
+    x_timestep_encoding_gamma = x_timestep_encoding_beta_gamma[:, :x.shape[-1]]
+    x_timestep_encoding_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_timestep_encoding_gamma)
 
-    x_positional_encoding_beta = x_positional_encoding_beta_gamma[:, x.shape[-1]:]
+    x_timestep_encoding_beta = x_timestep_encoding_beta_gamma[:, x.shape[-1]:]
 
-    x = tf.keras.layers.Multiply()([x, x_positional_encoding_gamma])
-    x = tf.keras.layers.Add()([x, x_positional_encoding_beta])
+    x = tf.keras.layers.Multiply()([x, x_timestep_encoding_gamma])
+    x = tf.keras.layers.Add()([x, x_timestep_encoding_beta])
 
     x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
@@ -734,19 +735,18 @@ def get_model_conv(x_train_images, x_positional_encodings, x_train_labels):
 
     x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-    x_positional_encoding_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
-    x_positional_encoding_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_positional_encoding)
-    x_positional_encoding_beta_gamma = tf.keras.layers.Dense(units=x_positional_encoding_beta_gamma_units)(
-        x_positional_encoding_beta_gamma)
+    x_timestep_encoding_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+    x_timestep_encoding_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_timestep_encoding)
+    x_timestep_encoding_beta_gamma = (tf.keras.layers.Dense(units=x_timestep_encoding_beta_gamma_units)
+                                      (x_timestep_encoding_beta_gamma))
 
-    x_positional_encoding_gamma = x_positional_encoding_beta_gamma[:, :x.shape[-1]]
-    x_positional_encoding_gamma = (
-        tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_positional_encoding_gamma))
+    x_timestep_encoding_gamma = x_timestep_encoding_beta_gamma[:, :x.shape[-1]]
+    x_timestep_encoding_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_timestep_encoding_gamma)
 
-    x_positional_encoding_beta = x_positional_encoding_beta_gamma[:, x.shape[-1]:]
+    x_timestep_encoding_beta = x_timestep_encoding_beta_gamma[:, x.shape[-1]:]
 
-    x = tf.keras.layers.Multiply()([x, x_positional_encoding_gamma])
-    x = tf.keras.layers.Add()([x, x_positional_encoding_beta])
+    x = tf.keras.layers.Multiply()([x, x_timestep_encoding_gamma])
+    x = tf.keras.layers.Add()([x, x_timestep_encoding_beta])
 
     x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
@@ -777,19 +777,18 @@ def get_model_conv(x_train_images, x_positional_encodings, x_train_labels):
 
         x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_positional_encoding_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
-        x_positional_encoding_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_positional_encoding)
-        x_positional_encoding_beta_gamma = tf.keras.layers.Dense(units=x_positional_encoding_beta_gamma_units)(
-            x_positional_encoding_beta_gamma)
+        x_timestep_encoding_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_timestep_encoding_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_timestep_encoding)
+        x_timestep_encoding_beta_gamma = (tf.keras.layers.Dense(units=x_timestep_encoding_beta_gamma_units)
+                                          (x_timestep_encoding_beta_gamma))
 
-        x_positional_encoding_gamma = x_positional_encoding_beta_gamma[:, :x.shape[-1]]
-        x_positional_encoding_gamma = (
-            tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_positional_encoding_gamma))
+        x_timestep_encoding_gamma = x_timestep_encoding_beta_gamma[:, :x.shape[-1]]
+        x_timestep_encoding_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_timestep_encoding_gamma)
 
-        x_positional_encoding_beta = x_positional_encoding_beta_gamma[:, x.shape[-1]:]
+        x_timestep_encoding_beta = x_timestep_encoding_beta_gamma[:, x.shape[-1]:]
 
-        x = tf.keras.layers.Multiply()([x, x_positional_encoding_gamma])
-        x = tf.keras.layers.Add()([x, x_positional_encoding_beta])
+        x = tf.keras.layers.Multiply()([x, x_timestep_encoding_gamma])
+        x = tf.keras.layers.Add()([x, x_timestep_encoding_beta])
 
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
@@ -819,19 +818,18 @@ def get_model_conv(x_train_images, x_positional_encodings, x_train_labels):
 
         x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_positional_encoding_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
-        x_positional_encoding_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_positional_encoding)
-        x_positional_encoding_beta_gamma = tf.keras.layers.Dense(units=x_positional_encoding_beta_gamma_units)(
-            x_positional_encoding_beta_gamma)
+        x_timestep_encoding_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_timestep_encoding_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_timestep_encoding)
+        x_timestep_encoding_beta_gamma = (tf.keras.layers.Dense(units=x_timestep_encoding_beta_gamma_units)
+                                          (x_timestep_encoding_beta_gamma))
 
-        x_positional_encoding_gamma = x_positional_encoding_beta_gamma[:, :x.shape[-1]]
-        x_positional_encoding_gamma = (
-            tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_positional_encoding_gamma))
+        x_timestep_encoding_gamma = x_timestep_encoding_beta_gamma[:, :x.shape[-1]]
+        x_timestep_encoding_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_timestep_encoding_gamma)
 
-        x_positional_encoding_beta = x_positional_encoding_beta_gamma[:, x.shape[-1]:]
+        x_timestep_encoding_beta = x_timestep_encoding_beta_gamma[:, x.shape[-1]:]
 
-        x = tf.keras.layers.Multiply()([x, x_positional_encoding_gamma])
-        x = tf.keras.layers.Add()([x, x_positional_encoding_beta])
+        x = tf.keras.layers.Multiply()([x, x_timestep_encoding_gamma])
+        x = tf.keras.layers.Add()([x, x_timestep_encoding_beta])
 
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
@@ -890,19 +888,18 @@ def get_model_conv(x_train_images, x_positional_encodings, x_train_labels):
 
     x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-    x_positional_encoding_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
-    x_positional_encoding_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_positional_encoding)
-    x_positional_encoding_beta_gamma = tf.keras.layers.Dense(units=x_positional_encoding_beta_gamma_units)(
-        x_positional_encoding_beta_gamma)
+    x_timestep_encoding_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+    x_timestep_encoding_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_timestep_encoding)
+    x_timestep_encoding_beta_gamma = (tf.keras.layers.Dense(units=x_timestep_encoding_beta_gamma_units)
+                                      (x_timestep_encoding_beta_gamma))
 
-    x_positional_encoding_gamma = x_positional_encoding_beta_gamma[:, :x.shape[-1]]
-    x_positional_encoding_gamma = (
-        tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_positional_encoding_gamma))
+    x_timestep_encoding_gamma = x_timestep_encoding_beta_gamma[:, :x.shape[-1]]
+    x_timestep_encoding_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_timestep_encoding_gamma)
 
-    x_positional_encoding_beta = x_positional_encoding_beta_gamma[:, x.shape[-1]:]
+    x_timestep_encoding_beta = x_timestep_encoding_beta_gamma[:, x.shape[-1]:]
 
-    x = tf.keras.layers.Multiply()([x, x_positional_encoding_gamma])
-    x = tf.keras.layers.Add()([x, x_positional_encoding_beta])
+    x = tf.keras.layers.Multiply()([x, x_timestep_encoding_gamma])
+    x = tf.keras.layers.Add()([x, x_timestep_encoding_beta])
 
     x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
@@ -921,12 +918,12 @@ def get_model_conv(x_train_images, x_positional_encodings, x_train_labels):
 
     x = tf.keras.layers.Add()([x, x_res])
 
-    x = tf.keras.layers.Conv2D(filters=input_shape[-1],
+    x = tf.keras.layers.Conv2D(filters=image_input_shape[-1],
                                kernel_size=(1, 1),
                                strides=(1, 1),
                                padding="same")(x)
 
-    model = tf.keras.Model(inputs=[x_input, x_positional_encoding_input, x_label_input],
+    model = tf.keras.Model(inputs=[x_input, x_timestep_encoding_input, x_label_input],
                            outputs=[x])
 
     return model
@@ -943,7 +940,7 @@ def get_model_conv_alex(x_train_images, x_train_labels):
         image_input_shape = list(x_train_images.shape[1:])
 
     x_noise_input = tf.keras.Input(shape=image_input_shape)
-    x_positional_encoding_input = tf.keras.Input(shape=1)
+    x_timestep_encoding_input = tf.keras.Input(shape=1)
     x_label_input = tf.keras.Input(shape=x_train_labels.shape[1:])
 
     x = tf.keras.layers.Conv2D(filters=filters[0],
@@ -952,15 +949,15 @@ def get_model_conv_alex(x_train_images, x_train_labels):
                                padding="same",
                                kernel_initializer=tf.keras.initializers.orthogonal)(x_noise_input)
 
-    x_positional_encoding = (
+    x_timestep_encoding = (
         tf.keras.layers.Embedding(input_dim=number_of_timesteps,
                                   output_dim=filters[-1],
                                   embeddings_initializer=tf.keras.initializers.RandomNormal(stddev=1.0))
-        (x_positional_encoding_input))
-    x_positional_encoding = x_positional_encoding[:, 0]
-    x_positional_encoding = (tf.keras.layers.Dense(units=filters[-1],
-                                                   kernel_initializer=tf.keras.initializers.orthogonal)
-                             (x_positional_encoding))
+        (x_timestep_encoding_input))
+    x_timestep_encoding = x_timestep_encoding[:, 0]
+    x_timestep_encoding = (tf.keras.layers.Dense(units=filters[-1],
+                                                 kernel_initializer=tf.keras.initializers.orthogonal)
+                           (x_timestep_encoding))
 
     x_label = (tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
                                          output_dim=filters[-1],
@@ -971,7 +968,7 @@ def get_model_conv_alex(x_train_images, x_train_labels):
                                      kernel_initializer=tf.keras.initializers.orthogonal)
                (x_label))
 
-    x_conditioning = tf.keras.layers.Concatenate()([x_positional_encoding, x_label])
+    x_conditioning = tf.keras.layers.Concatenate()([x_timestep_encoding, x_label])
 
     for i in range(conditional_dense_layers):
         x_conditioning = (tf.keras.layers.Dense(units=filters[-1],
@@ -1031,8 +1028,8 @@ def get_model_conv_alex(x_train_images, x_train_labels):
             x_shape = x.shape
             x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
             x = tf.keras.layers.Reshape(target_shape=(x_shape_prod, x_shape[-1]))(x)
-            x = tfm.nlp.layers.KernelAttention(num_heads=num_heads,
-                                               key_dim=key_dim,
+            x = tfm.nlp.layers.KernelAttention(num_heads=num_heads[i],
+                                               key_dim=key_dim[i],
                                                feature_transform="elu")(x, x)
             x = tf.keras.layers.Reshape(target_shape=x_shape[1:])(x)
 
@@ -1136,8 +1133,8 @@ def get_model_conv_alex(x_train_images, x_train_labels):
         x_shape = x.shape
         x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
         x = tf.keras.layers.Reshape(target_shape=(x_shape_prod, x_shape[-1]))(x)
-        x = tfm.nlp.layers.KernelAttention(num_heads=num_heads,
-                                           key_dim=key_dim,
+        x = tfm.nlp.layers.KernelAttention(num_heads=num_heads[-1],
+                                           key_dim=key_dim[-1],
                                            feature_transform="elu")(x, x)
         x = tf.keras.layers.Reshape(target_shape=x_shape[1:])(x)
 
@@ -1248,7 +1245,7 @@ def get_model_conv_alex(x_train_images, x_train_labels):
                                kernel_initializer=tf.keras.initializers.zeros)(x)
     x = tf.keras.layers.Add()([x, x_noise_input])
 
-    model = tf.keras.Model(inputs=[x_noise_input, x_positional_encoding_input, x_label_input],
+    model = tf.keras.Model(inputs=[x_noise_input, x_timestep_encoding_input, x_label_input],
                            outputs=[x])
 
     return model
@@ -1266,7 +1263,7 @@ def get_model_conv_alex_image_input(x_train_images, x_train_labels):
 
     x_noise_input = tf.keras.Input(shape=image_input_shape)
     x_image_input = tf.keras.Input(shape=image_input_shape)
-    x_positional_encoding_input = tf.keras.Input(shape=1)
+    x_timestep_encoding_input = tf.keras.Input(shape=1)
     x_label_input = tf.keras.Input(shape=x_train_labels.shape[1:])
     x_counterfactual_label_input = tf.keras.Input(shape=x_train_labels.shape[1:])
 
@@ -1276,12 +1273,12 @@ def get_model_conv_alex_image_input(x_train_images, x_train_labels):
                                padding="same",
                                kernel_initializer=tf.keras.initializers.orthogonal)(x_noise_input)
 
-    x_positional_encoding = (
+    x_timestep_encoding = (
         tf.keras.layers.Embedding(input_dim=number_of_timesteps,
                                   output_dim=filters[-1],
                                   embeddings_initializer=tf.keras.initializers.RandomNormal(stddev=1.0))
-        (x_positional_encoding_input))
-    x_positional_encoding = x_positional_encoding[:, 0]
+        (x_timestep_encoding_input))
+    x_timestep_encoding = x_timestep_encoding[:, 0]
 
     x_label = (tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
                                          output_dim=filters[-1],
@@ -1289,14 +1286,14 @@ def get_model_conv_alex_image_input(x_train_images, x_train_labels):
                (x_label_input))
     x_label = x_label[:, 0]
 
-    x_positional_encoding_image_conditioning = (
+    x_timestep_encoding_image_conditioning = (
         tf.keras.layers.Dense(units=filters[-1],
-                              kernel_initializer=tf.keras.initializers.orthogonal)(x_positional_encoding))
+                              kernel_initializer=tf.keras.initializers.orthogonal)(x_timestep_encoding))
 
     x_label_image_conditioning = (tf.keras.layers.Dense(units=filters[-1],
                                                         kernel_initializer=tf.keras.initializers.orthogonal)(x_label))
 
-    x_image_conditioning = tf.keras.layers.Concatenate()([x_positional_encoding_image_conditioning,
+    x_image_conditioning = tf.keras.layers.Concatenate()([x_timestep_encoding_image_conditioning,
                                                           x_label_image_conditioning])
 
     for i in range(conditional_dense_layers):
@@ -1406,8 +1403,8 @@ def get_model_conv_alex_image_input(x_train_images, x_train_labels):
         #     x_image_shape = x_image.shape
         #     x_image_shape_prod = tf.math.reduce_prod(x_image_shape[1:-1]).numpy()
         #     x_image = tf.keras.layers.Reshape(target_shape=(x_image_shape_prod, x_image_shape[-1]))(x_image)
-        #     x_image = (tfm.nlp.layers.KernelAttention(num_heads=num_heads[i],
-        #                                               key_dim=key_dim[i],
+        #     x_image = (tfm.nlp.layers.KernelAttention(num_heads=num_heads[-1],
+        #                                               key_dim=key_dim[-1],
         #                                               kernel_initializer=tf.keras.initializers.orthogonal,
         #                                               feature_transform="elu")(x_image, x_image))
         #     x_image = tf.keras.layers.Reshape(target_shape=x_image_shape[1:])(x_image)
@@ -1467,14 +1464,14 @@ def get_model_conv_alex_image_input(x_train_images, x_train_labels):
     x_image = tf.keras.layers.Dense(units=filters[-1],
                                     kernel_initializer=tf.keras.initializers.orthogonal)(x_image)
 
-    x_positional_encoding_conditioning = (tf.keras.layers.Dense(units=filters[-1],
-                                                                kernel_initializer=tf.keras.initializers.orthogonal)
-                                          (x_positional_encoding))
+    x_timestep_encoding_conditioning = (tf.keras.layers.Dense(units=filters[-1],
+                                                              kernel_initializer=tf.keras.initializers.orthogonal)
+                                        (x_timestep_encoding))
 
     x_label_conditioning = (tf.keras.layers.Dense(units=filters[-1],
                                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_label))
 
-    x_conditioning = tf.keras.layers.Concatenate()([x_image, x_positional_encoding_conditioning, x_label_conditioning])
+    x_conditioning = tf.keras.layers.Concatenate()([x_image, x_timestep_encoding_conditioning, x_label_conditioning])
 
     for i in range(conditional_dense_layers):
         x_conditioning = (tf.keras.layers.Dense(units=filters[-1],
@@ -1482,10 +1479,10 @@ def get_model_conv_alex_image_input(x_train_images, x_train_labels):
                           (x_conditioning))
         x_conditioning = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning)
 
-    x_positional_encoding_counterfactual_conditioning = (
+    x_timestep_encoding_counterfactual_conditioning = (
         tf.keras.layers.Dense(units=filters[-1],
                               kernel_initializer=tf.keras.initializers.orthogonal)
-        (x_positional_encoding))
+        (x_timestep_encoding))
 
     x_counterfactual_label = (
         tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
@@ -1494,7 +1491,7 @@ def get_model_conv_alex_image_input(x_train_images, x_train_labels):
         (x_counterfactual_label_input))
     x_counterfactual_label = x_counterfactual_label[:, 0]
 
-    x_counterfactual_conditioning = tf.keras.layers.Concatenate()([x_positional_encoding_counterfactual_conditioning,
+    x_counterfactual_conditioning = tf.keras.layers.Concatenate()([x_timestep_encoding_counterfactual_conditioning,
                                                                    x_counterfactual_label])
 
     for i in range(conditional_dense_layers):
@@ -1825,7 +1822,7 @@ def get_model_conv_alex_image_input(x_train_images, x_train_labels):
                                kernel_initializer=tf.keras.initializers.zeros)(x)
     x = tf.keras.layers.Add()([x, x_noise_input])
 
-    model = tf.keras.Model(inputs=[x_noise_input, x_image_input, x_positional_encoding_input, x_label_input,
+    model = tf.keras.Model(inputs=[x_noise_input, x_image_input, x_timestep_encoding_input, x_label_input,
                                    x_counterfactual_label_input], outputs=[x])
 
     return model
@@ -1992,19 +1989,6 @@ def root_mean_squared_error(y_true, y_pred):
     return loss
 
 
-def gaussian_negative_log_likelihood(y_true, y_pred_mean, y_pred_std):
-    y_true = tf.reshape(y_true, (y_true.shape[0], -1))
-    y_pred_mean = tf.reshape(y_pred_mean, (y_pred_mean.shape[0], -1))
-    y_pred_std = tf.reshape(y_pred_std, (y_pred_std.shape[0], -1))
-
-    loss = (
-        -tf.math.reduce_mean((-(tf.math.pow((tf.math.divide_no_nan((y_true - y_pred_mean), y_pred_std)), 2.0) / 2.0)
-                              - (tf.math.log(y_pred_std + tf.keras.backend.epsilon())) -  # noqa
-                              (tf.math.log(2.0 * np.pi) / 2.0))))  # noqa
-
-    return loss
-
-
 def get_error(y_true, y_pred):
     error = tf.math.reduce_mean(tf.math.abs(tf.math.log(tf.math.abs(tf.math.divide_no_nan(y_pred, y_true)) +
                                                         tf.keras.backend.epsilon()))) * 100.0
@@ -2042,7 +2026,7 @@ def output_image(image, standard_scaler, current_output_path):
 
 
 def validate(model, beta, alpha, alpha_bar, sqrt_alpha_bar, one_minus_sqrt_alpha_bar, x_test_images, standard_scaler,
-             x_positional_encodings, x_test_labels, i):
+             x_timestep_encodings, x_test_labels, i):
     validate_output_path = "{0}/validate/".format(output_path)
 
     output_input_bool = False
@@ -2077,20 +2061,20 @@ def validate(model, beta, alpha, alpha_bar, sqrt_alpha_bar, one_minus_sqrt_alpha
 
     for j in range(start_timestep - 1, 0, -1):
         if alex_bool:
-            current_x_positional_encoding = tf.convert_to_tensor(j)
-            current_x_positional_encoding = tf.expand_dims(current_x_positional_encoding, axis=0)
+            current_x_timestep_encoding = tf.convert_to_tensor(j)
+            current_x_timestep_encoding = tf.expand_dims(current_x_timestep_encoding, axis=0)
 
             if image_input_bool:
-                y_pred = model([current_x_test_image_with_noise, current_x_test_image, current_x_positional_encoding,
+                y_pred = model([current_x_test_image_with_noise, current_x_test_image, current_x_timestep_encoding,
                                 current_x_test_label, counterfactual_x_test_label], training=False)
             else:
-                y_pred = model([current_x_test_image_with_noise, current_x_positional_encoding,
+                y_pred = model([current_x_test_image_with_noise, current_x_timestep_encoding,
                                 counterfactual_x_test_label], training=False)
         else:
-            current_x_positional_encoding = x_positional_encodings[j]
-            current_x_positional_encoding = tf.expand_dims(current_x_positional_encoding, axis=0)
+            current_x_timestep_encoding = x_timestep_encodings[j]
+            current_x_timestep_encoding = tf.expand_dims(current_x_timestep_encoding, axis=0)
 
-            y_pred = model([current_x_test_image_with_noise, current_x_positional_encoding,
+            y_pred = model([current_x_test_image_with_noise, current_x_timestep_encoding,
                             counterfactual_x_test_label], training=False)
 
         current_x_test_image_with_noise = ddpm(current_x_test_image_with_noise, y_pred, j, beta, alpha, alpha_bar)
@@ -2106,11 +2090,11 @@ def validate(model, beta, alpha, alpha_bar, sqrt_alpha_bar, one_minus_sqrt_alpha
 
 def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epochs, beta, alpha, alpha_bar,
                                 sqrt_alpha_bar, one_minus_sqrt_alpha_bar, x_train_images, x_test_images,
-                                standard_scaler, x_positional_encodings, x_train_labels, x_test_labels):
+                                standard_scaler, x_timestep_encodings, x_train_labels, x_test_labels):
     print("train")
 
     validate(model, beta, alpha, alpha_bar, sqrt_alpha_bar, one_minus_sqrt_alpha_bar, x_test_images,
-             standard_scaler, x_positional_encodings, x_test_labels, 0)
+             standard_scaler, x_timestep_encodings, x_test_labels, 0)
 
     x_train_images_len = len(x_train_images)
 
@@ -2156,11 +2140,11 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
                 current_timestep = timesteps.pop(0)
 
                 if alex_bool:
-                    current_x_positional_encoding = tf.convert_to_tensor(current_timestep)
-                    current_x_positional_encoding = tf.expand_dims(current_x_positional_encoding, axis=0)
+                    current_x_timestep_encoding = tf.convert_to_tensor(current_timestep)
+                    current_x_timestep_encoding = tf.expand_dims(current_x_timestep_encoding, axis=0)
                 else:
-                    current_x_positional_encoding = x_positional_encodings[current_timestep]
-                    current_x_positional_encoding = tf.expand_dims(current_x_positional_encoding, axis=0)
+                    current_x_timestep_encoding = x_timestep_encodings[current_timestep]
+                    current_x_timestep_encoding = tf.expand_dims(current_x_timestep_encoding, axis=0)
 
                 current_x_train_image_with_noise, y_true = (
                     forward_noise(current_x_train_image, current_timestep, sqrt_alpha_bar, one_minus_sqrt_alpha_bar))
@@ -2170,7 +2154,7 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
                         if i + 1 > mean_squared_error_epochs:
                             with tf.GradientTape() as tape:
                                 y_pred = model([current_x_train_image_with_noise, current_x_train_image,
-                                                current_x_positional_encoding, current_x_train_label,
+                                                current_x_timestep_encoding, current_x_train_label,
                                                 current_x_train_label], training=True)
 
                                 loss = tf.math.reduce_sum([root_mean_squared_error(y_true, y_pred),
@@ -2178,7 +2162,7 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
                         else:
                             with tf.GradientTape() as tape:
                                 y_pred = model([current_x_train_image_with_noise, current_x_train_image,
-                                                current_x_positional_encoding, current_x_train_label,
+                                                current_x_timestep_encoding, current_x_train_label,
                                                 current_x_train_label], training=True)
 
                                 loss = tf.math.reduce_sum([mean_squared_error(y_true, y_pred),
@@ -2186,14 +2170,14 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
                     else:
                         if i + 1 > mean_squared_error_epochs:
                             with tf.GradientTape() as tape:
-                                y_pred = model([current_x_train_image_with_noise, current_x_positional_encoding,
+                                y_pred = model([current_x_train_image_with_noise, current_x_timestep_encoding,
                                                 current_x_train_label], training=True)
 
                                 loss = tf.math.reduce_sum([root_mean_squared_error(y_true, y_pred),
                                                            tf.math.reduce_sum(model.losses)])
                         else:
                             with tf.GradientTape() as tape:
-                                y_pred = model([current_x_train_image_with_noise, current_x_positional_encoding,
+                                y_pred = model([current_x_train_image_with_noise, current_x_timestep_encoding,
                                                 current_x_train_label], training=True)
 
                                 loss = tf.math.reduce_sum([mean_squared_error(y_true, y_pred),
@@ -2201,14 +2185,14 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
                 else:
                     if i + 1 > mean_squared_error_epochs:
                         with tf.GradientTape() as tape:
-                            y_pred = model([current_x_train_image_with_noise, current_x_positional_encoding,
+                            y_pred = model([current_x_train_image_with_noise, current_x_timestep_encoding,
                                             current_x_train_label], training=True)
 
                             loss = tf.math.reduce_sum([root_mean_squared_error(y_true, y_pred),
                                                        tf.math.reduce_sum(model.losses)])
                     else:
                         with tf.GradientTape() as tape:
-                            y_pred = model([current_x_train_image_with_noise, current_x_positional_encoding,
+                            y_pred = model([current_x_train_image_with_noise, current_x_timestep_encoding,
                                             current_x_train_label], training=True)
 
                             loss = tf.math.reduce_sum([mean_squared_error(y_true, y_pred),
@@ -2241,18 +2225,18 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
                 str(loss.numpy()), str(error.numpy())))
 
         validate(model, beta, alpha, alpha_bar, sqrt_alpha_bar, one_minus_sqrt_alpha_bar, x_test_images,
-                 standard_scaler, x_positional_encodings, x_test_labels, i + 1)
+                 standard_scaler, x_timestep_encodings, x_test_labels, i + 1)
 
     return model
 
 
 def train(model, optimiser, batch_sizes, batch_sizes_epochs, beta, alpha, alpha_bar, sqrt_alpha_bar,
-          one_minus_sqrt_alpha_bar, x_train_images, x_test_images, standard_scaler, x_positional_encodings,
+          one_minus_sqrt_alpha_bar, x_train_images, x_test_images, standard_scaler, x_timestep_encodings,
           x_train_labels, x_test_labels):
     print("train")
 
     validate(model, beta, alpha, alpha_bar, sqrt_alpha_bar, one_minus_sqrt_alpha_bar, x_test_images,
-             standard_scaler, x_positional_encodings, x_test_labels, 0)
+             standard_scaler, x_timestep_encodings, x_test_labels, 0)
 
     x_train_images_len = len(x_train_images)
 
@@ -2290,7 +2274,7 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, beta, alpha, alpha_
             current_x_train_images = tf.convert_to_tensor(current_x_train_images)
             current_x_train_labels = tf.convert_to_tensor(current_x_train_labels)
 
-            current_x_positional_encodings = []
+            current_x_timestep_encodings = []
 
             if unbatch_timesteps_bool:
                 current_x_train_images_with_noise = []
@@ -2304,9 +2288,9 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, beta, alpha, alpha_
                     current_timestep = timesteps.pop(0)
 
                     if alex_bool:
-                        current_x_positional_encodings.append(current_timestep)
+                        current_x_timestep_encodings.append(current_timestep)
                     else:
-                        current_x_positional_encodings.append(x_positional_encodings[current_timestep])
+                        current_x_timestep_encodings.append(x_timestep_encodings[current_timestep])
 
                     current_x_train_image_with_noise, current_noise = (
                         forward_noise(tf.expand_dims(current_x_train_images[k], axis=0), current_timestep,
@@ -2315,7 +2299,7 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, beta, alpha, alpha_
                     current_x_train_images_with_noise.append(current_x_train_image_with_noise[0])
                     y_true.append(current_noise[0])
 
-                current_x_positional_encodings = tf.convert_to_tensor(current_x_positional_encodings)
+                current_x_timestep_encodings = tf.convert_to_tensor(current_x_timestep_encodings)
                 current_x_train_images_with_noise = tf.convert_to_tensor(current_x_train_images_with_noise)
                 y_true = tf.convert_to_tensor(y_true)
             else:
@@ -2327,12 +2311,12 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, beta, alpha, alpha_
 
                 if alex_bool:
                     for k in range(current_batch_size):
-                        current_x_positional_encodings.append(current_timestep)
+                        current_x_timestep_encodings.append(current_timestep)
                 else:
                     for k in range(current_batch_size):
-                        current_x_positional_encodings.append(x_positional_encodings[current_timestep])
+                        current_x_timestep_encodings.append(x_timestep_encodings[current_timestep])
 
-                current_x_positional_encodings = tf.convert_to_tensor(current_x_positional_encodings)
+                current_x_timestep_encodings = tf.convert_to_tensor(current_x_timestep_encodings)
 
                 current_x_train_images_with_noise, y_true = (
                     forward_noise(current_x_train_images, current_timestep, sqrt_alpha_bar, one_minus_sqrt_alpha_bar))
@@ -2342,7 +2326,7 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, beta, alpha, alpha_
                     if i + 1 > mean_squared_error_epochs:
                         with tf.GradientTape() as tape:
                             y_pred = model([current_x_train_images_with_noise, current_x_train_images,
-                                            current_x_positional_encodings, current_x_train_labels,
+                                            current_x_timestep_encodings, current_x_train_labels,
                                             current_x_train_labels], training=True)
 
                             loss = tf.math.reduce_sum([root_mean_squared_error(y_true, y_pred),
@@ -2350,7 +2334,7 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, beta, alpha, alpha_
                     else:
                         with tf.GradientTape() as tape:
                             y_pred = model([current_x_train_images_with_noise, current_x_train_images,
-                                            current_x_positional_encodings, current_x_train_labels,
+                                            current_x_timestep_encodings, current_x_train_labels,
                                             current_x_train_labels], training=True)
 
                             loss = tf.math.reduce_sum([mean_squared_error(y_true, y_pred),
@@ -2358,14 +2342,14 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, beta, alpha, alpha_
                 else:
                     if i + 1 > mean_squared_error_epochs:
                         with tf.GradientTape() as tape:
-                            y_pred = model([current_x_train_images_with_noise, current_x_positional_encodings,
+                            y_pred = model([current_x_train_images_with_noise, current_x_timestep_encodings,
                                             current_x_train_labels], training=True)
 
                             loss = tf.math.reduce_sum([root_mean_squared_error(y_true, y_pred),
                                                        tf.math.reduce_sum(model.losses)])
                     else:
                         with tf.GradientTape() as tape:
-                            y_pred = model([current_x_train_images_with_noise, current_x_positional_encodings,
+                            y_pred = model([current_x_train_images_with_noise, current_x_timestep_encodings,
                                             current_x_train_labels], training=True)
 
                             loss = tf.math.reduce_sum([mean_squared_error(y_true, y_pred),
@@ -2373,14 +2357,14 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, beta, alpha, alpha_
             else:
                 if i + 1 > mean_squared_error_epochs:
                     with tf.GradientTape() as tape:
-                        y_pred = model([current_x_train_images_with_noise, current_x_positional_encodings,
+                        y_pred = model([current_x_train_images_with_noise, current_x_timestep_encodings,
                                         current_x_train_labels], training=True)
 
                         loss = tf.math.reduce_sum([root_mean_squared_error(y_true, y_pred),
                                                    tf.math.reduce_sum(model.losses)])
                 else:
                     with tf.GradientTape() as tape:
-                        y_pred = model([current_x_train_images_with_noise, current_x_positional_encodings,
+                        y_pred = model([current_x_train_images_with_noise, current_x_timestep_encodings,
                                         current_x_train_labels], training=True)
 
                         loss = tf.math.reduce_sum([mean_squared_error(y_true, y_pred),
@@ -2402,13 +2386,13 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, beta, alpha, alpha_
                 str(loss.numpy()), str(error.numpy())))
 
         validate(model, beta, alpha, alpha_bar, sqrt_alpha_bar, one_minus_sqrt_alpha_bar, x_test_images,
-                 standard_scaler, x_positional_encodings, x_test_labels, i + 1)
+                 standard_scaler, x_timestep_encodings, x_test_labels, i + 1)
 
     return model
 
 
 def test(model, beta, alpha, alpha_bar, sqrt_alpha_bar, one_minus_sqrt_alpha_bar, x_test_images, standard_scaler,
-         x_positional_encodings, x_test_labels):
+         x_timestep_encodings, x_test_labels):
     print("test")
 
     test_output_path = "{0}/test/".format(output_path)
@@ -2434,9 +2418,8 @@ def test(model, beta, alpha, alpha_bar, sqrt_alpha_bar, one_minus_sqrt_alpha_bar
         for j in range(test_batch_size):
             current_index = index + j
 
-            current_x_test_image = current_x_test_images[j]
-            output_image(current_x_test_image, standard_scaler, "{0}/{1}_input.png".format(test_output_path,
-                                                                                           str(current_index)))
+            output_image(current_x_test_images[j], standard_scaler,
+                         "{0}/{1}_input.png".format(test_output_path, str(current_index)))
 
         start_timestep = int(np.round(number_of_timesteps * output_start_timestep_proportion))
 
@@ -2454,32 +2437,31 @@ def test(model, beta, alpha, alpha_bar, sqrt_alpha_bar, one_minus_sqrt_alpha_bar
 
             current_index_test_output_path = "{0}/{1}/".format(test_output_path, str(current_index))
 
-            current_x_test_image_with_noise = current_x_test_images_with_noise[k]
-            output_image(current_x_test_image_with_noise, standard_scaler, "{0}/{1}.png".format(
+            output_image(current_x_test_images_with_noise[k], standard_scaler, "{0}/{1}.png".format(
                 current_index_test_output_path, str(start_timestep)))
 
         for j in range(start_timestep - 1, 0, -1):
-            current_x_positional_encodings = []
+            current_x_timestep_encodings = []
 
             if alex_bool:
                 for k in range(test_batch_size):
-                    current_x_positional_encodings.append(j)
+                    current_x_timestep_encodings.append(j)
             else:
                 for k in range(test_batch_size):
-                    current_x_positional_encodings.append(x_positional_encodings[j])
+                    current_x_timestep_encodings.append(x_timestep_encodings[j])
 
-            current_x_positional_encodings = tf.convert_to_tensor(current_x_positional_encodings)
+            current_x_timestep_encodings = tf.convert_to_tensor(current_x_timestep_encodings)
 
             if alex_bool:
                 if image_input_bool:
                     y_pred = model([current_x_test_images_with_noise, current_x_test_images,
-                                    current_x_positional_encodings, current_x_test_labels, current_x_test_labels],
+                                    current_x_timestep_encodings, current_x_test_labels, current_x_test_labels],
                                    training=False)
                 else:
-                    y_pred = model([current_x_test_images_with_noise, current_x_positional_encodings,
+                    y_pred = model([current_x_test_images_with_noise, current_x_timestep_encodings,
                                     current_x_test_labels], training=False)
             else:
-                y_pred = model([current_x_test_images_with_noise, current_x_positional_encodings,
+                y_pred = model([current_x_test_images_with_noise, current_x_timestep_encodings,
                                 current_x_test_labels], training=False)
 
             current_x_test_images_with_noise = ddpm(current_x_test_images_with_noise, y_pred, j, beta, alpha, alpha_bar)
@@ -2489,15 +2471,13 @@ def test(model, beta, alpha, alpha_bar, sqrt_alpha_bar, one_minus_sqrt_alpha_bar
 
                 current_index_test_output_path = "{0}/{1}/".format(test_output_path, str(current_index))
 
-                current_x_test_image_with_noise = current_x_test_images_with_noise[k]
-                output_image(current_x_test_image_with_noise, standard_scaler, "{0}/{1}.png".format(
+                output_image(current_x_test_images_with_noise[k], standard_scaler, "{0}/{1}.png".format(
                     current_index_test_output_path, str(j)))
 
         for j in range(test_batch_size):
             current_index = index + j
 
-            current_x_test_image_with_noise = current_x_test_images_with_noise[j]
-            output_image(current_x_test_image_with_noise, standard_scaler, "{0}/{1}.png".format(
+            output_image(current_x_test_images_with_noise[j], standard_scaler, "{0}/{1}.png".format(
                 test_output_path, str(current_index)))
 
     return True
@@ -2513,9 +2493,9 @@ def main():
         mkdir_p(output_path)
 
     x_train_images, x_test_images, x_train_labels, x_test_labels = get_input()
-    x_positional_encodings = get_positional_encodings(filters[-1])
-    x_train_images, x_test_images, standard_scaler, x_positional_encodings, x_train_labels, x_test_labels = (
-        preprocess_input(x_train_images, x_test_images, x_positional_encodings, x_train_labels, x_test_labels))
+    x_timestep_encodings = get_positional_encodings(filters[-1])
+    x_train_images, x_test_images, standard_scaler, x_timestep_encodings, x_train_labels, x_test_labels = (
+        preprocess_input(x_train_images, x_test_images, x_timestep_encodings, x_train_labels, x_test_labels))
 
     if alex_bool:
         if image_input_bool:
@@ -2523,7 +2503,7 @@ def main():
         else:
             model = get_model_conv_alex(x_train_images, x_train_labels)
     else:
-        model = get_model_conv(x_train_images, x_positional_encodings, x_train_labels)
+        model = get_model_conv(x_train_images, x_timestep_encodings, x_train_labels)
 
     model.summary()
 
@@ -2552,17 +2532,17 @@ def main():
     if gradient_accumulation_bool:
         model = train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epochs, beta, alpha, alpha_bar,
                                             sqrt_alpha_bar, one_minus_sqrt_alpha_bar, x_train_images, x_test_images,
-                                            standard_scaler, x_positional_encodings, x_train_labels, x_test_labels)
+                                            standard_scaler, x_timestep_encodings, x_train_labels, x_test_labels)
     else:
         model = train(model, optimiser, batch_sizes, batch_sizes_epochs, beta, alpha, alpha_bar, sqrt_alpha_bar,
-                      one_minus_sqrt_alpha_bar, x_train_images, x_test_images, standard_scaler, x_positional_encodings,
+                      one_minus_sqrt_alpha_bar, x_train_images, x_test_images, standard_scaler, x_timestep_encodings,
                       x_train_labels, x_test_labels)
 
     if epochs > 0:
         optimiser.finalize_variable_values(model.trainable_variables)
 
     test(model, beta, alpha, alpha_bar, sqrt_alpha_bar, one_minus_sqrt_alpha_bar, x_test_images, standard_scaler,
-         x_positional_encodings, x_test_labels)
+         x_timestep_encodings, x_test_labels)
 
     return True
 
