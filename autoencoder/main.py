@@ -27,13 +27,13 @@ from PIL import Image
 np.seterr(all="print")
 
 
-dataset_name = "mnist"
+dataset_name = "cifar10"
 output_path = "../output/autoencoder/"
 
 read_data_from_storage_bool = False
 
 preprocess_list_bool = False
-greyscale_bool = True
+greyscale_bool = False
 min_output_dimension_size = 32
 max_output_dimension_size = 32
 
@@ -69,8 +69,8 @@ if gradient_accumulation_bool:
     max_batch_size = 32
 else:
     if alex_bool:
-        min_batch_size = 32
-        max_batch_size = 32
+        min_batch_size = 16
+        max_batch_size = 16
     else:
         min_batch_size = 32
         max_batch_size = 32
@@ -91,7 +91,10 @@ max_angle = 45.0
 translate_bool = False
 translate_proportion = 0.25
 
-mean_squared_error_epoch = 1
+if alex_bool:
+    mean_squared_error_epoch = 1
+else:
+    mean_squared_error_epoch = epochs
 
 gaussian_latent_loss_weight = 0.0
 
@@ -1103,19 +1106,10 @@ def get_model_conv_alex_discrete(x_train_images, x_train_labels):
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-    x_latent_quantised = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                                kernel_size=(1, 1),
-                                                strides=(1, 1),
-                                                padding="same",
-                                                kernel_initializer=tf.keras.initializers.orthogonal)(x)
-    x_latent_quantised = (tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w c -> b c (h w)"})
-                          (x_latent_quantised))
+    x_shape_prod = tf.math.reduce_prod(x.shape[1:-1]).numpy()
     x_latent_quantised, x_latent_discretised = (
-        VectorQuantiser(embedding_dim=x_latent_quantised.shape[-1],
-                        num_embeddings=int(tf.math.round(x_latent_quantised.shape[-1] * num_embeddings_multiplier)))
-        (x_latent_quantised))
-    x_latent_quantised = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b c (h w) -> b h w c",
-                                                                             'w': x.shape[2]})(x_latent_quantised)
+        VectorQuantiser(embedding_dim=x_shape_prod,
+                        num_embeddings=int(tf.math.round(x_shape_prod * num_embeddings_multiplier)))(x))
 
     x = x_latent_quantised
 
@@ -1766,19 +1760,10 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-    x_latent_quantised = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                                kernel_size=(1, 1),
-                                                strides=(1, 1),
-                                                padding="same",
-                                                kernel_initializer=tf.keras.initializers.orthogonal)(x)
-    x_latent_quantised = (tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w c -> b c (h w)"})
-                          (x_latent_quantised))
+    x_shape_prod = tf.math.reduce_prod(x.shape[1:-1]).numpy()
     x_latent_quantised, x_latent_discretised = (
-        VectorQuantiser(embedding_dim=x_latent_quantised.shape[-1],
-                        num_embeddings=int(tf.math.round(x_latent_quantised.shape[-1] * num_embeddings_multiplier)))
-        (x_latent_quantised))
-    x_latent_quantised = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b c (h w) -> b h w c",
-                                                                             'w': x.shape[2]})(x_latent_quantised)
+        VectorQuantiser(embedding_dim=x_shape_prod,
+                        num_embeddings=int(tf.math.round(x_shape_prod * num_embeddings_multiplier)))(x))
 
     x = x_latent_quantised
 

@@ -3,6 +3,7 @@
 # For internal research only.
 
 
+import einops
 import tensorflow as tf
 
 
@@ -39,8 +40,10 @@ class VectorQuantiser(tf.keras.layers.Layer):
 
         # You can learn more about adding losses to different layers here:
         # https://keras.io/guides/making_new_layers_and_models_via_subclassing/.
-        self.add_loss(tf.math.reduce_mean(tf.math.pow(tf.math.reduce_mean(x) - self.mean, 2.0)))
-        self.add_loss(tf.math.reduce_mean(tf.math.pow(tf.math.reduce_std(x) - self.stddev, 2.0)))
+        self.add_loss(tf.math.reduce_mean(tf.math.pow(tf.math.reduce_mean(x, axis=[1, 2, 3]) - self.mean, 2.0)))
+        self.add_loss(tf.math.reduce_mean(tf.math.pow(tf.math.reduce_std(x, axis=[1, 2, 3]) - self.stddev, 2.0)))
+
+        standardised = einops.rearrange(standardised, "b h w c -> b c (h w)")
 
         # Calculate the input shape of the inputs and then flatten the inputs keeping `embedding_dim` intact.
         discretised = self.get_discretised(tf.reshape(standardised, [-1, self.embedding_dim]))
@@ -54,6 +57,9 @@ class VectorQuantiser(tf.keras.layers.Layer):
         # https://keras.io/guides/making_new_layers_and_models_via_subclassing/.
         # Check the original paper to get a handle on the formulation of the loss function.
         self.add_loss(tf.math.reduce_mean(tf.math.pow(tf.stop_gradient(standardised) - quantised, 2.0)))
+
+        quantised = einops.rearrange(quantised, "b c (h w) -> b h w c", w=x.shape[2])
+        discretised = tf.reshape(discretised, [-1, quantised.shape[-1]])
 
         quantised = (quantised + self.mean) * self.stddev
 
