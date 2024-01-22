@@ -33,8 +33,8 @@ convert_rgb_to_greyscale_bool = False
 min_output_dimension_size = None
 max_output_dimension_size = None
 
-conv_bool = True
 deep_bool = True
+conv_bool = True
 alex_bool = True
 dense_layers = 4
 filters = [64, 128, 256, 512, 1024]
