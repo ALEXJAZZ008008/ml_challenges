@@ -27,15 +27,15 @@ from PIL import Image
 np.seterr(all="print")
 
 
-dataset_name = "cifar10"
+dataset_name = "imagenette"
 output_path = "../output/autoencoder/"
 
-read_data_from_storage_bool = False
+read_data_from_storage_bool = True
 
-preprocess_list_bool = False
-greyscale_bool = False
-min_output_dimension_size = 32
-max_output_dimension_size = 32
+preprocess_list_bool = True
+greyscale_bool = True
+min_output_dimension_size = 256
+max_output_dimension_size = 256
 
 deep_bool = True
 conv_bool = True
@@ -46,7 +46,15 @@ dense_layers = 4
 conditional_dense_layers = 2
 filters = [64, 128, 256, 512, 1024]
 conv_layers = [2, 2, 2, 2, 2]
-latent_shape = (2, 2, filters[-1])
+
+filters_len = len(filters)
+
+if max_output_dimension_size is not None:
+    latent_x_y_size = int(np.round(max_output_dimension_size / np.power(2.0, filters_len - 1.0)))
+    latent_shape = (latent_x_y_size, latent_x_y_size, filters[-1])
+else:
+    latent_shape = None
+
 num_heads = 4
 key_dim = 32
 num_embeddings_multiplier = 64.0
@@ -60,7 +68,7 @@ else:
     weight_decay = 0.0
     ema_overwrite_frequency = None
 
-gradient_accumulation_bool = False
+gradient_accumulation_bool = True
 
 epochs = 256
 
@@ -69,8 +77,8 @@ if gradient_accumulation_bool:
     max_batch_size = 32
 else:
     if alex_bool:
-        min_batch_size = 16
-        max_batch_size = 16
+        min_batch_size = 32
+        max_batch_size = 32
     else:
         min_batch_size = 32
         max_batch_size = 32
@@ -126,7 +134,8 @@ def get_input():
     dataset = tfds.load(dataset_name)
 
     dataset_train = dataset["train"]
-    dataset_test = dataset["test"]
+    # dataset_test = dataset["test"]
+    dataset_test = dataset["validation"]
 
     x_train_images = []
     x_test_images = []
@@ -202,13 +211,15 @@ def convert_rgb_to_greyscale(images):
     return images
 
 
-def get_next_geometric_value(an, a0):
-    n = np.log2(an / a0) + 1
+def get_next_geometric_value(value, base):
+    power = np.log2(value / base) + 1
 
-    if not n.is_integer():
-        an = a0 * np.power(2.0, (np.ceil(n) - 1.0))
+    if not power.is_integer():
+        next_value = base * np.power(2.0, (np.ceil(power) - 1.0))
+    else:
+        next_value = value
 
-    return an
+    return next_value
 
 
 def rescale_images_list(images):
@@ -325,8 +336,8 @@ def pad_images_list(images):
 
         if read_data_from_storage_bool:
             current_padding_masks_split = padding_masks[i].strip().split('.')
-            padding_masks[i] = "{0}_padding_mask.{1}".format(current_padding_masks_split[0],
-                                                             current_padding_masks_split[1])
+            padding_masks[i] = "../{0}_padding_mask.{1}".format(current_padding_masks_split[2],
+                                                                current_padding_masks_split[3])
 
         padding_masks[i] = set_data_from_storage(padding_mask, padding_masks[i])
 
@@ -357,10 +368,21 @@ def preprocess_images_list(x_train_images, x_test_images):
     x_train_images, x_train_padding_masks = pad_images_list(x_train_images)
     x_test_images, x_test_padding_masks = pad_images_list(x_test_images)
 
-    x_train_images = convert_images_to_tensor_list(x_train_images)
-    x_test_images = convert_images_to_tensor_list(x_test_images)
+    if read_data_from_storage_bool:
+        x_train_images = convert_images_to_tensor_list(x_train_images)
+        x_test_images = convert_images_to_tensor_list(x_test_images)
 
-    x_train_padding_masks = convert_images_to_tensor_list(x_train_padding_masks)
+        x_train_padding_masks = convert_images_to_tensor_list(x_train_padding_masks)
+    else:
+        x_train_images = np.array(x_train_images)
+        x_test_images = np.array(x_test_images)
+
+        x_train_padding_masks = np.array(x_train_padding_masks)
+
+        x_train_images = tf.convert_to_tensor(x_train_images)
+        x_test_images = tf.convert_to_tensor(x_test_images)
+
+        x_train_padding_masks = tf.convert_to_tensor(x_train_padding_masks)
 
     return x_train_images, x_train_padding_masks, x_test_images, standard_scaler
 
@@ -632,6 +654,13 @@ def get_model_conv_alex(x_train_images, x_train_labels):
 
     x_image_input = tf.keras.Input(shape=image_input_shape)
     x_label_input = tf.keras.Input(shape=x_train_labels.shape[1:])
+
+    global latent_x_y_size
+    global latent_shape
+
+    latent_x_y_size = int(np.round(image_input_shape[0] / np.power(2.0, len(filters) - 1.0)))
+    latent_shape = (latent_x_y_size, latent_x_y_size, filters[-1])
+
     x_latent_gaussian_input = tf.keras.Input(shape=latent_shape)
 
     x = tf.keras.layers.Conv2D(filters=filters[0],
@@ -649,8 +678,6 @@ def get_model_conv_alex(x_train_images, x_train_labels):
     for i in range(conditional_dense_layers):
         x_label = tf.keras.layers.Dense(units=filters[-1])(x_label)
         x_label = tf.keras.layers.Lambda(tf.keras.activations.relu)(x_label)
-
-    filters_len = len(filters)
 
     for i in range(filters_len - 1):
         x_res = x
@@ -726,7 +753,7 @@ def get_model_conv_alex(x_train_images, x_train_labels):
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
     x = tf.keras.layers.Add()([x, x_res])
 
-    if num_heads is not None:
+    if num_heads is not None and key_dim is not None:
         x_res = x
 
         x = Standardiser()(x)
@@ -1053,7 +1080,7 @@ def get_model_conv_alex_discrete(x_train_images, x_train_labels):
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
     x = tf.keras.layers.Add()([x, x_res])
 
-    if num_heads is not None:
+    if num_heads is not None and key_dim is not None:
         x_res = x
 
         x = Standardiser()(x)
@@ -1212,6 +1239,13 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
 
     x_image_input = tf.keras.Input(shape=image_input_shape)
     x_label_input = tf.keras.Input(shape=x_train_labels.shape[1:])
+
+    global latent_x_y_size
+    global latent_shape
+
+    latent_x_y_size = int(np.round(image_input_shape[0] / np.power(2.0, len(filters) - 1.0)))
+    latent_shape = (latent_x_y_size, latent_x_y_size, filters[-1])
+
     x_latent_gaussian_input = tf.keras.Input(shape=latent_shape)
 
     x = tf.keras.layers.Conv2D(filters=filters[0],
@@ -1229,8 +1263,6 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
     for i in range(conditional_dense_layers):
         x_label = tf.keras.layers.Dense(units=filters[-1])(x_label)
         x_label = tf.keras.layers.Lambda(tf.keras.activations.relu)(x_label)
-
-    filters_len = len(filters)
 
     for i in range(filters_len - 1):
         x_res = x
@@ -1306,7 +1338,7 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
     x = tf.keras.layers.Add()([x, x_res])
 
-    if num_heads is not None:
+    if num_heads is not None and key_dim is not None:
         x_res = x
 
         x = Standardiser()(x)
@@ -1707,7 +1739,7 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
     x = tf.keras.layers.Add()([x, x_res])
 
-    if num_heads is not None:
+    if num_heads is not None and key_dim is not None:
         x_res = x
 
         x = Standardiser()(x)
@@ -2099,6 +2131,9 @@ def get_error(y_true, y_pred):
 
 def output_image(image, standard_scaler, current_output_path):
     image = image.numpy()
+    # padding_mask = padding_mask.numpy()
+
+    # image = image[padding_mask]
 
     image = np.reshape(standard_scaler.inverse_transform(np.reshape(image, (-1, 1))), image.shape)
     image = np.clip(image, 0.0, 255.0).astype(np.uint8)
