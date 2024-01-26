@@ -40,32 +40,26 @@ max_output_dimension_size = 256
 deep_bool = True
 conv_bool = True
 alex_bool = True
-discrete_bool = True
+gaussian_latent_bool = True
+discrete_bool = False
 gaussian_negative_log_likelihood_bool = False
 dense_layers = 4
 conditional_dense_layers = 2
 filters = [64, 128, 256, 512, 1024]
 conv_layers = [2, 2, 2, 2, 2]
-
-filters_len = len(filters)
-
-if max_output_dimension_size is not None:
-    latent_x_y_size = int(np.round(max_output_dimension_size / np.power(2.0, filters_len - 1.0)))
-    latent_shape = (latent_x_y_size, latent_x_y_size, filters[-1])
-else:
-    latent_shape = None
-
 num_heads = 4
 key_dim = 32
-num_embeddings_multiplier = 64.0
+num_embeddings = 64
 
 if alex_bool:
     learning_rate = 1e-04
     weight_decay = 0.0
+    use_ema = True
     ema_overwrite_frequency = None
 else:
     learning_rate = 1e-04
     weight_decay = 0.0
+    use_ema = False
     ema_overwrite_frequency = None
 
 gradient_accumulation_bool = True
@@ -322,6 +316,7 @@ def pad_images_list(images):
 
     output_dimension_size = get_next_geometric_value(max_dimension_size, 2.0)
 
+    original_shapes = []
     padding_masks = copy.deepcopy(images)
 
     for i in range(len(images)):
@@ -329,7 +324,9 @@ def pad_images_list(images):
 
         padding_mask = np.ones(image.shape, dtype=np.float32)
 
+        original_shapes.append(image.shape)
         image = pad_image(image, output_dimension_size)
+
         padding_mask = pad_image(padding_mask, output_dimension_size)
 
         images[i] = set_data_from_storage(image, images[i])
@@ -341,7 +338,20 @@ def pad_images_list(images):
 
         padding_masks[i] = set_data_from_storage(padding_mask, padding_masks[i])
 
-    return images, padding_masks
+    return images, original_shapes, padding_masks
+
+
+def convert_to_boolean_mask_list(images):
+    print("convert_to_boolean_mask_list")
+
+    for i in range(len(images)):
+        image = get_data_from_storage(images[i])
+
+        image = image.astype(bool)
+
+        images[i] = set_data_from_storage(image, images[i])
+
+    return images
 
 
 def convert_images_to_tensor_list(images):
@@ -365,26 +375,36 @@ def preprocess_images_list(x_train_images, x_test_images):
 
     x_train_images, x_test_images, standard_scaler = normalise_images_list(x_train_images, x_test_images)
 
-    x_train_images, x_train_padding_masks = pad_images_list(x_train_images)
-    x_test_images, x_test_padding_masks = pad_images_list(x_test_images)
+    x_train_images, x_train_original_shapes, x_train_padding_masks = pad_images_list(x_train_images)
+    x_test_images, x_test_original_shapes, x_test_padding_masks = pad_images_list(x_test_images)
 
     if read_data_from_storage_bool:
         x_train_images = convert_images_to_tensor_list(x_train_images)
         x_test_images = convert_images_to_tensor_list(x_test_images)
 
+        x_train_padding_masks = convert_to_boolean_mask_list(x_train_padding_masks)
+        x_test_padding_masks = convert_to_boolean_mask_list(x_test_padding_masks)
+
         x_train_padding_masks = convert_images_to_tensor_list(x_train_padding_masks)
+        x_test_padding_masks = convert_images_to_tensor_list(x_test_padding_masks)
     else:
         x_train_images = np.array(x_train_images)
         x_test_images = np.array(x_test_images)
 
         x_train_padding_masks = np.array(x_train_padding_masks)
+        x_test_padding_masks = np.array(x_test_padding_masks)
 
         x_train_images = tf.convert_to_tensor(x_train_images)
         x_test_images = tf.convert_to_tensor(x_test_images)
 
-        x_train_padding_masks = tf.convert_to_tensor(x_train_padding_masks)
+        x_train_padding_masks = x_train_padding_masks.astype(bool)
+        x_test_padding_masks = x_test_padding_masks.astype(bool)
 
-    return x_train_images, x_train_padding_masks, x_test_images, standard_scaler
+        x_train_padding_masks = tf.convert_to_tensor(x_train_padding_masks)
+        x_test_padding_masks = tf.convert_to_tensor(x_test_padding_masks)
+
+    return (x_train_images, x_train_original_shapes, x_train_padding_masks, x_test_images, x_test_original_shapes,
+            x_test_padding_masks, standard_scaler)
 
 
 def rescale_images_array(images):
@@ -457,19 +477,29 @@ def preprocess_images_array(x_train_images, x_test_images):
 
     x_train_images, x_test_images, standard_scaler = normalise_images_array(x_train_images, x_test_images)
 
+    x_train_original_shapes = x_train_images.shape
+    x_test_original_shapes = x_test_images.shape
+
     x_train_padding_masks = np.ones(x_train_images.shape, dtype=np.float32)
+    x_test_padding_masks = np.ones(x_test_images.shape, dtype=np.float32)
 
     x_train_images = pad_images_array(x_train_images)
     x_test_images = pad_images_array(x_test_images)
 
     x_train_padding_masks = pad_images_array(x_train_padding_masks)
+    x_test_padding_masks = pad_images_array(x_test_padding_masks)
 
     x_train_images = tf.convert_to_tensor(x_train_images)
     x_test_images = tf.convert_to_tensor(x_test_images)
 
-    x_train_padding_masks = tf.convert_to_tensor(x_train_padding_masks)
+    x_train_padding_masks = x_train_padding_masks.astype(bool)
+    x_test_padding_masks = x_test_padding_masks.astype(bool)
 
-    return x_train_images, x_train_padding_masks, x_test_images, standard_scaler
+    x_train_padding_masks = tf.convert_to_tensor(x_train_padding_masks)
+    x_test_padding_masks = tf.convert_to_tensor(x_test_padding_masks)
+
+    return (x_train_images, x_train_original_shapes, x_train_padding_masks, x_test_images, x_test_original_shapes,
+            x_test_padding_masks, standard_scaler)
 
 
 def preprocess_labels(x_train_labels, x_test_labels):
@@ -489,15 +519,16 @@ def preprocess_input(x_train_images, x_test_images, x_train_labels, x_test_label
         x_test_images = convert_rgb_to_greyscale(x_test_images)
 
     if read_data_from_storage_bool or preprocess_list_bool:
-        x_train_images, x_train_padding_masks, x_test_images, standard_scaler = preprocess_images_list(x_train_images,
-                                                                                                       x_test_images)
+        (x_train_images, x_train_original_shapes, x_train_padding_masks, x_test_images, x_test_original_shapes,
+         x_test_padding_masks, standard_scaler) = preprocess_images_list(x_train_images, x_test_images)
     else:
-        x_train_images, x_train_padding_masks, x_test_images, standard_scaler = preprocess_images_array(x_train_images,
-                                                                                                        x_test_images)
+        (x_train_images, x_train_original_shapes, x_train_padding_masks, x_test_images, x_test_original_shapes,
+         x_test_padding_masks, standard_scaler) = preprocess_images_array(x_train_images, x_test_images)
 
     x_train_labels, x_test_labels = preprocess_labels(x_train_labels, x_test_labels)
 
-    return x_train_images, x_train_padding_masks, x_test_images, standard_scaler, x_train_labels, x_test_labels
+    return (x_train_images, x_train_original_shapes, x_train_padding_masks, x_test_images, x_test_original_shapes,
+            x_test_padding_masks, standard_scaler, x_train_labels, x_test_labels)
 
 
 def get_previous_geometric_value(an, a0):
@@ -655,14 +686,6 @@ def get_model_conv_alex(x_train_images, x_train_labels):
     x_image_input = tf.keras.Input(shape=image_input_shape)
     x_label_input = tf.keras.Input(shape=x_train_labels.shape[1:])
 
-    global latent_x_y_size
-    global latent_shape
-
-    latent_x_y_size = int(np.round(image_input_shape[0] / np.power(2.0, len(filters) - 1.0)))
-    latent_shape = (latent_x_y_size, latent_x_y_size, filters[-1])
-
-    x_latent_gaussian_input = tf.keras.Input(shape=latent_shape)
-
     x = tf.keras.layers.Conv2D(filters=filters[0],
                                kernel_size=(7, 7),
                                strides=(1, 1),
@@ -678,6 +701,8 @@ def get_model_conv_alex(x_train_images, x_train_labels):
     for i in range(conditional_dense_layers):
         x_label = tf.keras.layers.Dense(units=filters[-1])(x_label)
         x_label = tf.keras.layers.Lambda(tf.keras.activations.relu)(x_label)
+
+    filters_len = len(filters)
 
     for i in range(filters_len - 1):
         x_res = x
@@ -756,12 +781,12 @@ def get_model_conv_alex(x_train_images, x_train_labels):
     if num_heads is not None and key_dim is not None:
         x_res = x
 
-        x = Standardiser()(x)
+        x = Standardiser()(x)  # noqa
 
         x_shape = x.shape
         x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
         x = tf.keras.layers.Reshape(target_shape=(x_shape_prod, x_shape[-1]))(x)
-        x = (tfm.nlp.layers.KernelAttention(num_heads=num_heads,
+        x = (tfm.nlp.layers.KernelAttention(num_heads=num_heads,  # noqa
                                             key_dim=key_dim,
                                             kernel_initializer=tf.keras.initializers.orthogonal,
                                             feature_transform="elu")(x, x))
@@ -805,6 +830,224 @@ def get_model_conv_alex(x_train_images, x_train_labels):
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
+
+    x_latent = x
+    x_res = x
+
+    for i in range(conv_layers[-1]):
+        x = tf.keras.layers.Conv2D(filters=filters[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
+
+        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
+                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
+        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
+                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+
+        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
+                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
+        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
+                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_label_gamma])
+        x = tf.keras.layers.Add()([x, x_label_beta])
+        x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
+
+    x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(1, 1),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+    x = tf.keras.layers.Add()([x, x_res])
+
+    for i in range(filters_len - 2, -1, -1):
+        x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
+                                                                "c2": 2,
+                                                                "c3": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
+
+        x_res = x
+
+        for j in range(conv_layers[i]):
+            x = tf.keras.layers.Conv2D(filters=filters[i],
+                                       kernel_size=(3, 3),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x)
+
+            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
+                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
+            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
+                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+
+            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
+                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
+            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
+                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+
+            x = tf.keras.layers.Multiply()([x, x_label_gamma])
+            x = tf.keras.layers.Add()([x, x_label_beta])
+            x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
+
+        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                       kernel_size=(1, 1),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+        x = tf.keras.layers.Add()([x, x_res])
+
+    x = tf.keras.layers.Conv2D(filters=image_input_shape[-1],
+                               kernel_size=(3, 3),
+                               strides=(1, 1),
+                               padding="same",
+                               kernel_initializer=tf.keras.initializers.zeros)(x)
+
+    model = tf.keras.Model(inputs=[x_image_input, x_label_input],
+                           outputs=[x, x_latent])
+
+    return model
+
+
+def get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels):
+    print("get_model")
+
+    if read_data_from_storage_bool:
+        current_x_train_images = get_data_from_storage(x_train_images[0])
+
+        image_input_shape = list(current_x_train_images.shape)
+    else:
+        image_input_shape = list(x_train_images.shape[1:])
+
+    x_image_input = tf.keras.Input(shape=image_input_shape)
+    x_label_input = tf.keras.Input(shape=x_train_labels.shape[1:])
+
+    latent_x_y_size = int(np.round(image_input_shape[0] / np.power(2.0, len(filters) - 1.0)))
+    latent_shape = (latent_x_y_size, latent_x_y_size, filters[-1])
+
+    x_latent_gaussian_input = tf.keras.Input(shape=latent_shape)
+
+    x = tf.keras.layers.Conv2D(filters=filters[0],
+                               kernel_size=(7, 7),
+                               strides=(1, 1),
+                               padding="same",
+                               kernel_initializer=tf.keras.initializers.orthogonal)(x_image_input)
+
+    x_label = (tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
+                                         output_dim=filters[-1],
+                                         embeddings_initializer=tf.keras.initializers.RandomNormal(stddev=1.0))
+               (x_label_input))
+    x_label = x_label[:, 0]
+
+    for i in range(conditional_dense_layers):
+        x_label = tf.keras.layers.Dense(units=filters[-1])(x_label)
+        x_label = tf.keras.layers.Lambda(tf.keras.activations.relu)(x_label)
+
+    filters_len = len(filters)
+
+    for i in range(filters_len - 1):
+        x_res = x
+
+        for j in range(conv_layers[i]):
+            x = tf.keras.layers.Conv2D(filters=filters[i],
+                                       kernel_size=(3, 3),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x)
+
+            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
+                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
+            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
+                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+
+            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
+                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
+            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
+                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+
+            x = tf.keras.layers.Multiply()([x, x_label_gamma])
+            x = tf.keras.layers.Add()([x, x_label_beta])
+            x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
+
+        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                       kernel_size=(1, 1),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+        x = tf.keras.layers.Add()([x, x_res])
+
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b (h1 h2) (w1 w2) c -> b h1 w1 (c h2 w2)",
+                                                                "h2": 2,
+                                                                "w2": 2})(x)
+
+    x_res = x
+
+    for i in range(conv_layers[-1]):
+        x = tf.keras.layers.Conv2D(filters=filters[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
+
+        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
+                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
+        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
+                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+
+        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
+                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
+        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
+                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_label_gamma])
+        x = tf.keras.layers.Add()([x, x_label_beta])
+        x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
+
+    x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(1, 1),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+    x = tf.keras.layers.Add()([x, x_res])
+
+    if num_heads is not None and key_dim is not None:
+        x_res = x
+
+        x = Standardiser()(x)  # noqa
+
+        x_shape = x.shape
+        x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
+        x = tf.keras.layers.Reshape(target_shape=(x_shape_prod, x_shape[-1]))(x)
+        x = (tfm.nlp.layers.KernelAttention(num_heads=num_heads,  # noqa
+                                            key_dim=key_dim,
+                                            kernel_initializer=tf.keras.initializers.orthogonal,
+                                            feature_transform="elu")(x, x))
+        x = tf.keras.layers.Reshape(target_shape=x_shape[1:])(x)
+
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(1, 1),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.Add()([x_res, x])
 
     x_latent_mean = x
     x_res = x
@@ -1083,12 +1326,12 @@ def get_model_conv_alex_discrete(x_train_images, x_train_labels):
     if num_heads is not None and key_dim is not None:
         x_res = x
 
-        x = Standardiser()(x)
+        x = Standardiser()(x)  # noqa
 
         x_shape = x.shape
         x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
         x = tf.keras.layers.Reshape(target_shape=(x_shape_prod, x_shape[-1]))(x)
-        x = (tfm.nlp.layers.KernelAttention(num_heads=num_heads,
+        x = (tfm.nlp.layers.KernelAttention(num_heads=num_heads,  # noqa
                                             key_dim=key_dim,
                                             kernel_initializer=tf.keras.initializers.orthogonal,
                                             feature_transform="elu")(x, x))
@@ -1135,8 +1378,8 @@ def get_model_conv_alex_discrete(x_train_images, x_train_labels):
 
     x_shape_prod = tf.math.reduce_prod(x.shape[1:-1]).numpy()
     x_latent_quantised, x_latent_discretised = (
-        VectorQuantiser(embedding_dim=x_shape_prod,
-                        num_embeddings=int(tf.math.round(x_shape_prod * num_embeddings_multiplier)))(x))
+        VectorQuantiser(embedding_dim=x_shape_prod,  # noqa
+                        num_embeddings=num_embeddings)(x))
 
     x = x_latent_quantised
 
@@ -1240,14 +1483,6 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
     x_image_input = tf.keras.Input(shape=image_input_shape)
     x_label_input = tf.keras.Input(shape=x_train_labels.shape[1:])
 
-    global latent_x_y_size
-    global latent_shape
-
-    latent_x_y_size = int(np.round(image_input_shape[0] / np.power(2.0, len(filters) - 1.0)))
-    latent_shape = (latent_x_y_size, latent_x_y_size, filters[-1])
-
-    x_latent_gaussian_input = tf.keras.Input(shape=latent_shape)
-
     x = tf.keras.layers.Conv2D(filters=filters[0],
                                kernel_size=(7, 7),
                                strides=(1, 1),
@@ -1263,6 +1498,8 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
     for i in range(conditional_dense_layers):
         x_label = tf.keras.layers.Dense(units=filters[-1])(x_label)
         x_label = tf.keras.layers.Lambda(tf.keras.activations.relu)(x_label)
+
+    filters_len = len(filters)
 
     for i in range(filters_len - 1):
         x_res = x
@@ -1341,12 +1578,12 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
     if num_heads is not None and key_dim is not None:
         x_res = x
 
-        x = Standardiser()(x)
+        x = Standardiser()(x)  # noqa
 
         x_shape = x.shape
         x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
         x = tf.keras.layers.Reshape(target_shape=(x_shape_prod, x_shape[-1]))(x)
-        x = (tfm.nlp.layers.KernelAttention(num_heads=num_heads,
+        x = (tfm.nlp.layers.KernelAttention(num_heads=num_heads,  # noqa
                                             key_dim=key_dim,
                                             kernel_initializer=tf.keras.initializers.orthogonal,
                                             feature_transform="elu")(x, x))
@@ -1390,6 +1627,298 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
+
+    x_latent = x
+    x_res = x
+
+    for i in range(conv_layers[-1]):
+        x = tf.keras.layers.Conv2D(filters=filters[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
+
+        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
+                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
+        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
+                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+
+        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
+                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
+        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
+                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_label_gamma])
+        x = tf.keras.layers.Add()([x, x_label_beta])
+        x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
+
+    x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(1, 1),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+    x = tf.keras.layers.Add()([x, x_res])
+
+    for i in range(filters_len - 2, -1, -1):
+        x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
+                                                                "c2": 2,
+                                                                "c3": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
+
+        x_res = x
+
+        for j in range(conv_layers[i]):
+            x = tf.keras.layers.Conv2D(filters=filters[i],
+                                       kernel_size=(3, 3),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x)
+
+            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
+                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
+            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
+                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+
+            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
+                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
+            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
+                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+
+            x = tf.keras.layers.Multiply()([x, x_label_gamma])
+            x = tf.keras.layers.Add()([x, x_label_beta])
+            x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
+
+        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                       kernel_size=(1, 1),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+        x = tf.keras.layers.Add()([x, x_res])
+
+    x_mean = x
+    x_res = x
+
+    for i in range(conv_layers[0]):
+        x_mean = tf.keras.layers.Conv2D(filters=filters[0],
+                                        kernel_size=(3, 3),
+                                        strides=(1, 1),
+                                        padding="same",
+                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_mean)
+
+        x_label_beta = tf.keras.layers.Dense(units=x_mean.shape[-1],
+                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
+        x_label_beta = tf.keras.layers.Dense(units=x_mean.shape[-1],
+                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+
+        x_label_gamma = tf.keras.layers.Dense(units=x_mean.shape[-1],
+                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
+        x_label_gamma = tf.keras.layers.Dense(units=x_mean.shape[-1],
+                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+
+        x_mean = tf.keras.layers.Multiply()([x_mean, x_label_gamma])
+        x_mean = tf.keras.layers.Add()([x_mean, x_label_beta])
+        x_mean = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_mean)
+
+    x_res = tf.keras.layers.Conv2D(filters=x_mean.shape[-1],
+                                   kernel_size=(1, 1),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+    x_mean = tf.keras.layers.Add()([x_mean, x_res])
+
+    x_mean = tf.keras.layers.Conv2D(filters=image_input_shape[-1],
+                                    kernel_size=(3, 3),
+                                    strides=(1, 1),
+                                    padding="same",
+                                    kernel_initializer=tf.keras.initializers.zeros)(x_mean)
+
+    x_stddev = x
+    x_res = x
+
+    for i in range(conv_layers[0]):
+        x_stddev = tf.keras.layers.Conv2D(filters=filters[0],
+                                          kernel_size=(3, 3),
+                                          strides=(1, 1),
+                                          padding="same",
+                                          kernel_initializer=tf.keras.initializers.orthogonal)(x_stddev)
+
+        x_label_beta = tf.keras.layers.Dense(units=x_stddev.shape[-1],
+                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
+        x_label_beta = tf.keras.layers.Dense(units=x_stddev.shape[-1],
+                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+
+        x_label_gamma = tf.keras.layers.Dense(units=x_stddev.shape[-1],
+                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
+        x_label_gamma = tf.keras.layers.Dense(units=x_stddev.shape[-1],
+                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+
+        x_stddev = tf.keras.layers.Multiply()([x_stddev, x_label_gamma])
+        x_stddev = tf.keras.layers.Add()([x_stddev, x_label_beta])
+        x_stddev = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_stddev)
+
+    x_res = tf.keras.layers.Conv2D(filters=x_stddev.shape[-1],
+                                   kernel_size=(1, 1),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+    x_stddev = tf.keras.layers.Add()([x_stddev, x_res])
+
+    x_stddev = tf.keras.layers.Conv2D(filters=image_input_shape[-1],
+                                      kernel_size=(3, 3),
+                                      strides=(1, 1),
+                                      padding="same",
+                                      kernel_initializer=tf.keras.initializers.orthogonal)(x_stddev)
+    x_stddev = tf.keras.layers.Lambda(tf.keras.activations.softplus)(x_stddev)
+    x_stddev = tf.keras.layers.Lambda(lambda x_current: x_current + tf.keras.backend.epsilon())(x_stddev)
+
+    model = tf.keras.Model(inputs=[x_image_input, x_label_input],
+                           outputs=[x_mean, x_stddev, x_latent])
+
+    return model
+
+
+def get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train_images, x_train_labels):
+    print("get_model")
+
+    if read_data_from_storage_bool:
+        current_x_train_images = get_data_from_storage(x_train_images[0])
+
+        image_input_shape = list(current_x_train_images.shape)
+    else:
+        image_input_shape = list(x_train_images.shape[1:])
+
+    x_image_input = tf.keras.Input(shape=image_input_shape)
+    x_label_input = tf.keras.Input(shape=x_train_labels.shape[1:])
+
+    latent_x_y_size = int(np.round(image_input_shape[0] / np.power(2.0, len(filters) - 1.0)))
+    latent_shape = (latent_x_y_size, latent_x_y_size, filters[-1])
+
+    x_latent_gaussian_input = tf.keras.Input(shape=latent_shape)
+
+    x = tf.keras.layers.Conv2D(filters=filters[0],
+                               kernel_size=(7, 7),
+                               strides=(1, 1),
+                               padding="same",
+                               kernel_initializer=tf.keras.initializers.orthogonal)(x_image_input)
+
+    x_label = (tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
+                                         output_dim=filters[-1],
+                                         embeddings_initializer=tf.keras.initializers.RandomNormal(stddev=1.0))
+               (x_label_input))
+    x_label = x_label[:, 0]
+
+    for i in range(conditional_dense_layers):
+        x_label = tf.keras.layers.Dense(units=filters[-1])(x_label)
+        x_label = tf.keras.layers.Lambda(tf.keras.activations.relu)(x_label)
+
+    filters_len = len(filters)
+
+    for i in range(filters_len - 1):
+        x_res = x
+
+        for j in range(conv_layers[i]):
+            x = tf.keras.layers.Conv2D(filters=filters[i],
+                                       kernel_size=(3, 3),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x)
+
+            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
+                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
+            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
+                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+
+            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
+                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
+            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
+                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+
+            x = tf.keras.layers.Multiply()([x, x_label_gamma])
+            x = tf.keras.layers.Add()([x, x_label_beta])
+            x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
+
+        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                       kernel_size=(1, 1),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+        x = tf.keras.layers.Add()([x, x_res])
+
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b (h1 h2) (w1 w2) c -> b h1 w1 (c h2 w2)",
+                                                                "h2": 2,
+                                                                "w2": 2})(x)
+
+    x_res = x
+
+    for i in range(conv_layers[-1]):
+        x = tf.keras.layers.Conv2D(filters=filters[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
+
+        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
+                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
+        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
+                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+
+        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
+                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
+        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
+        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
+                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_label_gamma])
+        x = tf.keras.layers.Add()([x, x_label_beta])
+        x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
+
+    x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(1, 1),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+    x = tf.keras.layers.Add()([x, x_res])
+
+    if num_heads is not None and key_dim is not None:
+        x_res = x
+
+        x = Standardiser()(x)  # noqa
+
+        x_shape = x.shape
+        x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
+        x = tf.keras.layers.Reshape(target_shape=(x_shape_prod, x_shape[-1]))(x)
+        x = (tfm.nlp.layers.KernelAttention(num_heads=num_heads,  # noqa
+                                            key_dim=key_dim,
+                                            kernel_initializer=tf.keras.initializers.orthogonal,
+                                            feature_transform="elu")(x, x))
+        x = tf.keras.layers.Reshape(target_shape=x_shape[1:])(x)
+
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(1, 1),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.Add()([x_res, x])
 
     x_latent_mean = x
     x_res = x
@@ -1742,12 +2271,12 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
     if num_heads is not None and key_dim is not None:
         x_res = x
 
-        x = Standardiser()(x)
+        x = Standardiser()(x)  # noqa
 
         x_shape = x.shape
         x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
         x = tf.keras.layers.Reshape(target_shape=(x_shape_prod, x_shape[-1]))(x)
-        x = (tfm.nlp.layers.KernelAttention(num_heads=num_heads,
+        x = (tfm.nlp.layers.KernelAttention(num_heads=num_heads,  # noqa
                                             key_dim=key_dim,
                                             kernel_initializer=tf.keras.initializers.orthogonal,
                                             feature_transform="elu")(x, x))
@@ -1794,8 +2323,8 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
 
     x_shape_prod = tf.math.reduce_prod(x.shape[1:-1]).numpy()
     x_latent_quantised, x_latent_discretised = (
-        VectorQuantiser(embedding_dim=x_shape_prod,
-                        num_embeddings=int(tf.math.round(x_shape_prod * num_embeddings_multiplier)))(x))
+        VectorQuantiser(embedding_dim=x_shape_prod,  # noqa
+                        num_embeddings=num_embeddings)(x))
 
     x = x_latent_quantised
 
@@ -2086,19 +2615,29 @@ def augmentation(image):
     return image
 
 
-def mean_squared_error(y_true, y_pred):
+def mean_squared_error(y_true, y_pred, mask):
+    y_true = tf.boolean_mask(y_true, mask)
+    y_pred = tf.boolean_mask(y_pred, mask)
+
     loss = tf.math.reduce_mean(tf.math.pow(y_true - y_pred, 2.0))
 
     return loss
 
 
-def root_mean_squared_error(y_true, y_pred):
+def root_mean_squared_error(y_true, y_pred, mask):
+    y_true = tf.boolean_mask(y_true, mask)
+    y_pred = tf.boolean_mask(y_pred, mask)
+
     loss = tf.math.sqrt(tf.math.reduce_mean(tf.math.pow(y_true - y_pred, 2.0)) + tf.keras.backend.epsilon())
 
     return loss
 
 
-def gaussian_negative_log_likelihood(y_true, y_pred_mean, y_pred_std):
+def gaussian_negative_log_likelihood(y_true, y_pred_mean, y_pred_std, mask):
+    y_true = tf.boolean_mask(y_true, mask)
+    y_pred_mean = tf.boolean_mask(y_pred_mean, mask)
+    y_pred_std = tf.boolean_mask(y_pred_std, mask)
+
     y_true = tf.reshape(y_true, (y_true.shape[0], -1))
     y_pred_mean = tf.reshape(y_pred_mean, (y_pred_mean.shape[0], -1))
     y_pred_std = tf.reshape(y_pred_std, (y_pred_std.shape[0], -1))
@@ -2122,18 +2661,22 @@ def gaussian_kullback_leibler_divergence(y_pred_mean, y_pred_std):
     return loss
 
 
-def get_error(y_true, y_pred):
+def get_error(y_true, y_pred, mask):
+    y_true = tf.boolean_mask(y_true, mask)
+    y_pred = tf.boolean_mask(y_pred, mask)
+
     error = tf.math.reduce_mean(tf.math.abs(tf.math.log(tf.math.abs(tf.math.divide_no_nan(y_pred, y_true)) +
                                                         tf.keras.backend.epsilon()))) * 100.0
 
     return error
 
 
-def output_image(image, standard_scaler, current_output_path):
+def output_image(image, original_shape, padding_mask, standard_scaler, current_output_path):
     image = image.numpy()
-    # padding_mask = padding_mask.numpy()
+    padding_mask = padding_mask.numpy()
 
-    # image = image[padding_mask]
+    image = image[padding_mask]
+    image = np.reshape(image, original_shape)
 
     image = np.reshape(standard_scaler.inverse_transform(np.reshape(image, (-1, 1))), image.shape)
     image = np.clip(image, 0.0, 255.0).astype(np.uint8)
@@ -2147,7 +2690,7 @@ def output_image(image, standard_scaler, current_output_path):
     return True
 
 
-def validate(model, x_test_images, standard_scaler, x_test_labels, i):
+def validate(model, x_test_images, x_test_original_shapes, x_test_padding_masks, standard_scaler, x_test_labels, i):
     validate_output_path = "{0}/validate/".format(output_path)
 
     output_input_bool = False
@@ -2158,29 +2701,20 @@ def validate(model, x_test_images, standard_scaler, x_test_labels, i):
         output_input_bool = True
 
     current_x_test_image = get_data_from_storage(x_test_images[0])
-
+    current_x_test_original_shape = x_test_original_shapes[0]
+    current_x_test_padding_mask = get_data_from_storage(x_test_padding_masks[0])
     current_x_test_label = x_test_labels[0]
 
     current_x_test_image = tf.expand_dims(current_x_test_image, axis=0)
+    current_x_test_padding_mask = tf.expand_dims(current_x_test_padding_mask, axis=0)
     current_x_test_label = tf.expand_dims(current_x_test_label, axis=0)
+
+    latent_x_y_size = int(np.round(current_x_test_image.shape[1] / np.power(2.0, len(filters) - 1.0)))
+    latent_shape = (latent_x_y_size, latent_x_y_size, filters[-1])
 
     if conv_bool and alex_bool:
         if gaussian_negative_log_likelihood_bool:
-            if discrete_bool:
-                y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
-                    model([current_x_test_image, current_x_test_label], training=False))
-
-                current_y_pred_mean = y_pred_mean[0]
-                output_image(current_y_pred_mean, standard_scaler, "{0}/{1}_mean.png".format(validate_output_path,
-                                                                                             str(i)))
-
-                y_pred = []
-
-                for j in range(int(tf.math.ceil(tf.math.reduce_max(y_pred_stddev) * 32.0))):
-                    y_pred.append(tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev))
-
-                y_pred = tf.math.reduce_mean(y_pred, axis=0)
-            else:
+            if gaussian_latent_bool:
                 y_pred_mean, y_pred_stddev, y_latent_mean, y_latent_stddev = (
                     model([current_x_test_image, current_x_test_label, tf.random.normal((1,) + latent_shape)],
                           training=False))
@@ -2188,8 +2722,8 @@ def validate(model, x_test_images, standard_scaler, x_test_labels, i):
                 y_pred_means = [y_pred_mean]
                 y_pred_stddevs = [y_pred_stddev]
 
-                for j in range(
-                        int(tf.math.reduce_max([tf.math.ceil(tf.math.reduce_max(y_latent_stddev) * 32.0), 32.0])) - 1):
+                for j in range(int(tf.math.reduce_max([tf.math.ceil(tf.math.reduce_max(y_latent_stddev) * 32.0),
+                                                       32.0])) - 1):
                     y_pred_mean, y_pred_stddev, y_latent_mean, y_latent_stddev = (
                         model([current_x_test_image, current_x_test_label, tf.random.normal((1,) + latent_shape)],
                               training=False))
@@ -2200,9 +2734,8 @@ def validate(model, x_test_images, standard_scaler, x_test_labels, i):
                 y_pred_mean = tf.math.reduce_mean(y_pred_means, axis=0)
                 y_pred_stddev = tf.math.reduce_mean(y_pred_stddevs, axis=0)
 
-                current_y_pred_mean = y_pred_mean[0]
-                output_image(current_y_pred_mean, standard_scaler, "{0}/{1}_mean.png".format(validate_output_path,
-                                                                                             str(i)))
+                output_image(y_pred_mean[0], current_x_test_original_shape, current_x_test_padding_mask[0],
+                             standard_scaler, "{0}/{1}_mean.png".format(validate_output_path, str(i)))
 
                 y_pred = []
 
@@ -2210,19 +2743,43 @@ def validate(model, x_test_images, standard_scaler, x_test_labels, i):
                     y_pred.append(tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev))
 
                 y_pred = tf.math.reduce_mean(y_pred, axis=0)
-        else:
-            if discrete_bool:
-                y_pred, x_latent_quantised, x_latent_discretised = model([current_x_test_image, current_x_test_label],
-                                                                         training=False)
             else:
+                if discrete_bool:
+                    y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
+                        model([current_x_test_image, current_x_test_label], training=False))
+
+                    output_image(y_pred_mean[0], current_x_test_original_shape, current_x_test_padding_mask[0],
+                                 standard_scaler, "{0}/{1}_mean.png".format(validate_output_path, str(i)))
+
+                    y_pred = []
+
+                    for j in range(int(tf.math.ceil(tf.math.reduce_max(y_pred_stddev) * 32.0))):
+                        y_pred.append(tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev))
+
+                    y_pred = tf.math.reduce_mean(y_pred, axis=0)
+                else:
+                    y_pred_mean, y_pred_stddev, y_latent = model([current_x_test_image, current_x_test_label],
+                                                                 training=False)
+
+                    output_image(y_pred_mean[0], current_x_test_original_shape, current_x_test_padding_mask[0],
+                                 standard_scaler, "{0}/{1}_mean.png".format(validate_output_path, str(i)))
+
+                    y_pred = []
+
+                    for j in range(int(tf.math.ceil(tf.math.reduce_max(y_pred_stddev) * 32.0))):
+                        y_pred.append(tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev))
+
+                    y_pred = tf.math.reduce_mean(y_pred, axis=0)
+        else:
+            if gaussian_latent_bool:
                 y_pred, y_latent_mean, y_latent_stddev = (
                     model([current_x_test_image, current_x_test_label, tf.random.normal((1,) + latent_shape)],
                           training=False))
 
                 y_preds = [y_pred]
 
-                for j in range(
-                        int(tf.math.reduce_max([tf.math.ceil(tf.math.reduce_max(y_latent_stddev) * 32.0), 32.0])) - 1):
+                for j in range(int(tf.math.reduce_max([tf.math.ceil(tf.math.reduce_max(y_latent_stddev) * 32.0),
+                                                       32.0])) - 1):
                     y_pred, y_latent_mean, y_latent_stddev = (
                         model([current_x_test_image, current_x_test_label, tf.random.normal((1,) + latent_shape)],
                               training=False))
@@ -2230,23 +2787,31 @@ def validate(model, x_test_images, standard_scaler, x_test_labels, i):
                     y_preds.append(y_pred)
 
                 y_pred = tf.math.reduce_mean(y_preds, axis=0)
+            else:
+                if discrete_bool:
+                    y_pred, x_latent_quantised, x_latent_discretised = (
+                        model([current_x_test_image, current_x_test_label], training=False))
+                else:
+                    y_pred, y_latent = (model([current_x_test_image, current_x_test_label], training=False))
     else:
         y_pred = model([current_x_test_image], training=False)
 
-    current_y_pred = y_pred[0]
-    output_image(current_y_pred, standard_scaler, "{0}/{1}.png".format(validate_output_path, str(i)))
+    output_image(y_pred[0], current_x_test_original_shape, current_x_test_padding_mask[0], standard_scaler,
+                 "{0}/{1}.png".format(validate_output_path, str(i)))
 
     if output_input_bool:
-        output_image(current_x_test_image[0], standard_scaler, "{0}/input.png".format(validate_output_path))
+        output_image(current_x_test_image[0], current_x_test_original_shape, current_x_test_padding_mask[0],
+                     standard_scaler, "{0}/input.png".format(validate_output_path))
 
     return True
 
 
 def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images,
-                                x_train_padding_masks, x_test_images, standard_scaler, x_train_labels, x_test_labels):
+                                x_train_padding_masks, x_test_images, x_test_original_shapes, x_test_padding_masks,
+                                standard_scaler, x_train_labels, x_test_labels):
     print("train")
 
-    validate(model, x_test_images, standard_scaler, x_test_labels, 0)
+    validate(model, x_test_images, x_test_original_shapes, x_test_padding_masks, standard_scaler, x_test_labels,0)
 
     x_train_images_len = len(x_train_images)
 
@@ -2254,6 +2819,14 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
     indices = list(range(x_train_images_len))
 
     batch_sizes_epochs_len = len(batch_sizes_epochs)
+
+    if conv_bool and alex_bool and gaussian_latent_bool and not discrete_bool:
+        latent_size_x_train_image = get_data_from_storage(x_train_images[0])
+
+        latent_x_y_size = int(np.round(latent_size_x_train_image.shape[1] / np.power(2.0, len(filters) - 1.0)))
+        latent_shape = (latent_x_y_size, latent_x_y_size, filters[-1])
+    else:
+        latent_shape = None
 
     for i in range(epochs):
         for j in range(batch_sizes_epochs_len - 1, 0, -1):
@@ -2284,47 +2857,21 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
                 current_x_train_label = x_train_labels[indices[current_index]]
 
                 current_x_train_image = tf.expand_dims(current_x_train_image, axis=0)
+                current_x_train_padding_mask = tf.expand_dims(current_x_train_padding_mask, axis=0)
                 current_x_train_label = tf.expand_dims(current_x_train_label, axis=0)
 
                 if conv_bool and alex_bool:
                     if gaussian_negative_log_likelihood_bool:
-                        if discrete_bool:
-                            if i + 1 > mean_squared_error_epoch:
-                                with tf.GradientTape() as tape:
-                                    y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
-                                        model([current_x_train_image, current_x_train_label], training=True))
-
-                                    y_pred_mean = y_pred_mean * current_x_train_padding_mask
-                                    y_pred_stddev = y_pred_stddev * current_x_train_padding_mask
-
-                                    loss = tf.math.reduce_sum([
-                                        gaussian_negative_log_likelihood(current_x_train_image, y_pred_mean,
-                                                                         y_pred_stddev),
-                                        tf.math.reduce_sum(model.losses)])
-                            else:
-                                with tf.GradientTape() as tape:
-                                    y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
-                                        model([current_x_train_image, current_x_train_label], training=True))
-
-                                    y_pred = tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev)
-
-                                    y_pred = y_pred * current_x_train_padding_mask
-
-                                    loss = tf.math.reduce_sum([mean_squared_error(current_x_train_image, y_pred),
-                                                               tf.math.reduce_sum(model.losses)])
-                        else:
+                        if gaussian_latent_bool:
                             if i + 1 > mean_squared_error_epoch:
                                 with tf.GradientTape() as tape:
                                     y_pred_mean, y_pred_stddev, y_latent_mean, y_latent_stddev = (
                                         model([current_x_train_image, current_x_train_label,
                                                tf.random.normal((1,) + latent_shape)], training=True))
 
-                                    y_pred_mean = y_pred_mean * current_x_train_padding_mask
-                                    y_pred_stddev = y_pred_stddev * current_x_train_padding_mask
-
                                     loss = tf.math.reduce_sum([
                                         gaussian_negative_log_likelihood(current_x_train_image, y_pred_mean,
-                                                                         y_pred_stddev),
+                                                                         y_pred_stddev, current_x_train_padding_mask),
                                         gaussian_latent_loss_weight *
                                         gaussian_kullback_leibler_divergence(y_latent_mean, y_latent_stddev),
                                         tf.math.reduce_sum(model.losses)])
@@ -2336,56 +2883,78 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
 
                                     y_pred = tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev)
 
-                                    y_pred = y_pred * current_x_train_padding_mask
-
                                     loss = tf.math.reduce_mean([
-                                        mean_squared_error(current_x_train_image, y_pred),
-                                        gaussian_latent_loss_weight * mean_squared_error(tf.zeros(y_latent_mean.shape),
-                                                                                         y_latent_mean),
-                                        gaussian_latent_loss_weight * mean_squared_error(tf.ones(y_latent_stddev.shape),
-                                                                                         y_latent_stddev),
+                                        mean_squared_error(current_x_train_image, y_pred, current_x_train_padding_mask),
+                                        gaussian_latent_loss_weight *
+                                        gaussian_kullback_leibler_divergence(y_latent_mean, y_latent_stddev),
                                         tf.math.reduce_sum(model.losses)])
+                        else:
+                            if discrete_bool:
+                                if i + 1 > mean_squared_error_epoch:
+                                    with tf.GradientTape() as tape:
+                                        y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
+                                            model([current_x_train_image, current_x_train_label], training=True))
+
+                                        loss = tf.math.reduce_sum([
+                                            gaussian_negative_log_likelihood(current_x_train_image, y_pred_mean,
+                                                                             y_pred_stddev,
+                                                                             current_x_train_padding_mask),
+                                            tf.math.reduce_sum(model.losses)])
+                                else:
+                                    with tf.GradientTape() as tape:
+                                        y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
+                                            model([current_x_train_image, current_x_train_label], training=True))
+
+                                        y_pred = tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev)
+
+                                        loss = tf.math.reduce_sum([mean_squared_error(current_x_train_image, y_pred,
+                                                                                      current_x_train_padding_mask),
+                                                                   tf.math.reduce_sum(model.losses)])
+                            else:
+                                if i + 1 > mean_squared_error_epoch:
+                                    with tf.GradientTape() as tape:
+                                        y_pred_mean, y_pred_stddev, y_latent = (
+                                            model([current_x_train_image, current_x_train_label], training=True))
+
+                                        loss = tf.math.reduce_sum([
+                                            gaussian_negative_log_likelihood(current_x_train_image, y_pred_mean,
+                                                                             y_pred_stddev,
+                                                                             current_x_train_padding_mask),
+                                            tf.math.reduce_sum(model.losses)])
+                                else:
+                                    with tf.GradientTape() as tape:
+                                        y_pred_mean, y_pred_stddev, y_latent = (
+                                            model([current_x_train_image, current_x_train_label], training=True))
+
+                                        y_pred = tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev)
+
+                                        loss = tf.math.reduce_mean([
+                                            mean_squared_error(current_x_train_image, y_pred,
+                                                               current_x_train_padding_mask),
+                                            tf.math.reduce_sum(model.losses)])
 
                         y_pred_stddev_full_coverage = y_pred_stddev * 3.0
 
-                        error_bounds = [get_error(current_x_train_image, y_pred_mean + y_pred_stddev_full_coverage),
-                                        get_error(current_x_train_image, y_pred_mean - y_pred_stddev_full_coverage)]
+                        error_bounds = [get_error(current_x_train_image, y_pred_mean + y_pred_stddev_full_coverage,
+                                                  current_x_train_padding_mask),
+                                        get_error(current_x_train_image, y_pred_mean - y_pred_stddev_full_coverage,
+                                                  current_x_train_padding_mask)]
                         error_upper_bound = tf.reduce_max(error_bounds)
                         error_lower_bound = tf.reduce_min(error_bounds)
 
                         errors.append(tf.math.reduce_mean([error_upper_bound, error_lower_bound]))
                         errors_range.append(error_upper_bound - error_lower_bound)
                     else:
-                        if discrete_bool:
-                            if i + 1 > mean_squared_error_epoch:
-                                with tf.GradientTape() as tape:
-                                    y_pred, x_latent_quantised, x_latent_discretised = (
-                                        model([current_x_train_image, current_x_train_label], training=True))
-
-                                    y_pred = y_pred * current_x_train_padding_mask
-
-                                    loss = tf.math.reduce_sum([root_mean_squared_error(current_x_train_image, y_pred),
-                                                               tf.math.reduce_sum(model.losses)])
-                            else:
-                                with tf.GradientTape() as tape:
-                                    y_pred, x_latent_quantised, x_latent_discretised = (
-                                        model([current_x_train_image, current_x_train_label], training=True))
-
-                                    y_pred = y_pred * current_x_train_padding_mask
-
-                                    loss = tf.math.reduce_sum([mean_squared_error(current_x_train_image, y_pred),
-                                                               tf.math.reduce_sum(model.losses)])
-                        else:
+                        if gaussian_latent_bool:
                             if i + 1 > mean_squared_error_epoch:
                                 with tf.GradientTape() as tape:
                                     y_pred, y_latent_mean, y_latent_stddev = (
                                         model([current_x_train_image, current_x_train_label,
                                                tf.random.normal((1,) + latent_shape)], training=True))
 
-                                    y_pred = y_pred * current_x_train_padding_mask
-
                                     loss = tf.math.reduce_sum([
-                                        root_mean_squared_error(current_x_train_image, y_pred),
+                                        root_mean_squared_error(current_x_train_image, y_pred,
+                                                                current_x_train_padding_mask),
                                         gaussian_latent_loss_weight *
                                         gaussian_kullback_leibler_divergence(y_latent_mean, y_latent_stddev),
                                         tf.math.reduce_sum(model.losses)])
@@ -2395,28 +2964,61 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
                                         model([current_x_train_image, current_x_train_label,
                                                tf.random.normal((1,) + latent_shape)], training=True))
 
-                                    y_pred = y_pred * current_x_train_padding_mask
-
                                     loss = tf.math.reduce_mean([
-                                        mean_squared_error(current_x_train_image, y_pred),
-                                        gaussian_latent_loss_weight * mean_squared_error(tf.zeros(y_latent_mean.shape),
-                                                                                         y_latent_mean),
-                                        gaussian_latent_loss_weight * mean_squared_error(tf.ones(y_latent_stddev.shape),
-                                                                                         y_latent_stddev),
+                                        mean_squared_error(current_x_train_image, y_pred, current_x_train_padding_mask),
+                                        gaussian_latent_loss_weight *
+                                        gaussian_kullback_leibler_divergence(y_latent_mean, y_latent_stddev),
                                         tf.math.reduce_sum(model.losses)])
+                        else:
+                            if discrete_bool:
+                                if i + 1 > mean_squared_error_epoch:
+                                    with tf.GradientTape() as tape:
+                                        y_pred, x_latent_quantised, x_latent_discretised = (
+                                            model([current_x_train_image, current_x_train_label], training=True))
 
-                        errors.append(get_error(current_x_train_image, y_pred))
+                                        loss = tf.math.reduce_sum([
+                                            root_mean_squared_error(current_x_train_image, y_pred,
+                                                                    current_x_train_padding_mask),
+                                            tf.math.reduce_sum(model.losses)])
+                                else:
+                                    with tf.GradientTape() as tape:
+                                        y_pred, x_latent_quantised, x_latent_discretised = (
+                                            model([current_x_train_image, current_x_train_label], training=True))
+
+                                        loss = tf.math.reduce_sum([mean_squared_error(current_x_train_image, y_pred,
+                                                                                      current_x_train_padding_mask),
+                                                                   tf.math.reduce_sum(model.losses)])
+                            else:
+                                if i + 1 > mean_squared_error_epoch:
+                                    with tf.GradientTape() as tape:
+                                        y_pred, y_latent = (
+                                            model([current_x_train_image, current_x_train_label], training=True))
+
+                                        loss = tf.math.reduce_sum([
+                                            root_mean_squared_error(current_x_train_image, y_pred,
+                                                                    current_x_train_padding_mask),
+                                            tf.math.reduce_sum(model.losses)])
+                                else:
+                                    with tf.GradientTape() as tape:
+                                        y_pred, y_latent = (
+                                            model([current_x_train_image, current_x_train_label], training=True))
+
+                                        loss = tf.math.reduce_mean([
+                                            mean_squared_error(current_x_train_image, y_pred,
+                                                               current_x_train_padding_mask),
+                                            tf.math.reduce_sum(model.losses)])
+
+                        errors.append(get_error(current_x_train_image, y_pred, current_x_train_padding_mask))
                         errors_range.append(tf.constant(0.0))
                 else:
                     with tf.GradientTape() as tape:
                         y_pred = model([current_x_train_image], training=True)
 
-                        y_pred = y_pred * current_x_train_padding_mask
-
-                        loss = tf.math.reduce_sum([mean_squared_error(current_x_train_image, y_pred),
+                        loss = tf.math.reduce_sum([mean_squared_error(current_x_train_image, y_pred,
+                                                                      current_x_train_padding_mask),
                                                    tf.math.reduce_sum(model.losses)])
 
-                    errors.append(get_error(current_x_train_image, y_pred))
+                    errors.append(get_error(current_x_train_image, y_pred, current_x_train_padding_mask))
                     errors_range.append(tf.constant(0.0))
 
                 gradients = tape.gradient(loss, model.trainable_weights)
@@ -2448,16 +3050,20 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
                 str(i + 1), str(epochs), str(current_batch_size), str(j + 1), str(iterations), loss_name,
                 str(loss.numpy()), str(error.numpy()), str(error_range.numpy())))
 
-        validate(model, x_test_images, standard_scaler, x_test_labels, i + 1)
+        if use_ema and ema_overwrite_frequency is None:
+            optimiser.finalize_variable_values(model.trainable_variables)
+
+        validate(model, x_test_images, x_test_original_shapes, x_test_padding_masks, standard_scaler, x_test_labels,
+                 i + 1)
 
     return model
 
 
 def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_train_padding_masks, x_test_images,
-          standard_scaler, x_train_labels, x_test_labels):
+          x_test_original_shapes, x_test_padding_masks, standard_scaler, x_train_labels, x_test_labels):
     print("train")
 
-    validate(model, x_test_images, standard_scaler, x_test_labels, 0)
+    validate(model, x_test_images, x_test_original_shapes, x_test_padding_masks, standard_scaler, x_test_labels, 0)
 
     x_train_images_len = len(x_train_images)
 
@@ -2465,6 +3071,14 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_t
     indices = list(range(x_train_images_len))
 
     batch_sizes_epochs_len = len(batch_sizes_epochs)
+
+    if conv_bool and alex_bool and gaussian_latent_bool and not discrete_bool:
+        latent_size_x_train_image = get_data_from_storage(x_train_images[0])
+
+        latent_x_y_size = int(np.round(latent_size_x_train_image.shape[1] / np.power(2.0, len(filters) - 1.0)))
+        latent_shape = (latent_x_y_size, latent_x_y_size, filters[-1])
+    else:
+        latent_shape = None
 
     for i in range(epochs):
         for j in range(batch_sizes_epochs_len - 1, 0, -1):
@@ -2500,31 +3114,7 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_t
 
             if conv_bool and alex_bool:
                 if gaussian_negative_log_likelihood_bool:
-                    if discrete_bool:
-                        if i + 1 > mean_squared_error_epoch:
-                            with tf.GradientTape() as tape:
-                                y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
-                                    model([current_x_train_images, current_x_train_labels], training=True))
-
-                                y_pred_mean = y_pred_mean * current_x_train_padding_masks
-                                y_pred_stddev = y_pred_stddev * current_x_train_padding_masks
-
-                                loss = tf.math.reduce_sum([
-                                    gaussian_negative_log_likelihood(current_x_train_images, y_pred_mean,
-                                                                     y_pred_stddev),
-                                    tf.math.reduce_sum(model.losses)])
-                        else:
-                            with tf.GradientTape() as tape:
-                                y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
-                                    model([current_x_train_images, current_x_train_labels], training=True))
-
-                                y_pred = tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev)
-
-                                y_pred = y_pred * current_x_train_padding_masks
-
-                                loss = tf.math.reduce_sum([mean_squared_error(current_x_train_images, y_pred),
-                                                           tf.math.reduce_sum(model.losses)])
-                    else:
+                    if gaussian_latent_bool:
                         if i + 1 > mean_squared_error_epoch:
                             with tf.GradientTape() as tape:
                                 y_pred_mean, y_pred_stddev, y_latent_mean, y_latent_stddev = (
@@ -2532,14 +3122,11 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_t
                                            tf.random.normal((current_batch_size,) + latent_shape)],
                                           training=True))
 
-                                y_pred_mean = y_pred_mean * current_x_train_padding_masks
-                                y_pred_stddev = y_pred_stddev * current_x_train_padding_masks
-
                                 loss = tf.math.reduce_sum([
                                     gaussian_negative_log_likelihood(current_x_train_images, y_pred_mean,
-                                                                     y_pred_stddev),
-                                    gaussian_latent_loss_weight * gaussian_kullback_leibler_divergence(y_latent_mean,
-                                                                                                       y_latent_stddev),
+                                                                     y_pred_stddev, current_x_train_padding_masks),
+                                    gaussian_latent_loss_weight *
+                                    gaussian_kullback_leibler_divergence(y_latent_mean, y_latent_stddev),
                                     tf.math.reduce_sum(model.losses)])
                         else:
                             with tf.GradientTape() as tape:
@@ -2549,46 +3136,67 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_t
 
                                 y_pred = tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev)
 
-                                y_pred = y_pred * current_x_train_padding_masks
-
                                 loss = tf.math.reduce_mean([
-                                    mean_squared_error(current_x_train_images, y_pred),
-                                    gaussian_latent_loss_weight * mean_squared_error(tf.zeros(y_latent_mean.shape),
-                                                                                     y_latent_mean),
-                                    gaussian_latent_loss_weight * mean_squared_error(tf.ones(y_latent_stddev.shape),
-                                                                                     y_latent_stddev),
+                                    mean_squared_error(current_x_train_images, y_pred, current_x_train_padding_masks),
+                                        gaussian_latent_loss_weight *
+                                        gaussian_kullback_leibler_divergence(y_latent_mean, y_latent_stddev),
                                     tf.math.reduce_sum(model.losses)])
+                    else:
+                        if discrete_bool:
+                            if i + 1 > mean_squared_error_epoch:
+                                with tf.GradientTape() as tape:
+                                    y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
+                                        model([current_x_train_images, current_x_train_labels], training=True))
+
+                                    loss = tf.math.reduce_sum([
+                                        gaussian_negative_log_likelihood(current_x_train_images, y_pred_mean,
+                                                                         y_pred_stddev, current_x_train_padding_masks),
+                                        tf.math.reduce_sum(model.losses)])
+                            else:
+                                with tf.GradientTape() as tape:
+                                    y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
+                                        model([current_x_train_images, current_x_train_labels], training=True))
+
+                                    y_pred = tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev)
+
+                                    loss = tf.math.reduce_sum([mean_squared_error(current_x_train_images, y_pred,
+                                                                                  current_x_train_padding_masks),
+                                                               tf.math.reduce_sum(model.losses)])
+                        else:
+                            if i + 1 > mean_squared_error_epoch:
+                                with tf.GradientTape() as tape:
+                                    y_pred_mean, y_pred_stddev, y_latent = (
+                                        model([current_x_train_images, current_x_train_labels], training=True))
+
+                                    loss = tf.math.reduce_sum([
+                                        gaussian_negative_log_likelihood(current_x_train_images, y_pred_mean,
+                                                                         y_pred_stddev, current_x_train_padding_masks),
+                                        tf.math.reduce_sum(model.losses)])
+                            else:
+                                with tf.GradientTape() as tape:
+                                    y_pred_mean, y_pred_stddev, y_latent = (
+                                        model([current_x_train_images, current_x_train_labels], training=True))
+
+                                    y_pred = tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev)
+
+                                    loss = tf.math.reduce_mean([
+                                        mean_squared_error(current_x_train_images, y_pred,
+                                                           current_x_train_padding_masks),
+                                        tf.math.reduce_sum(model.losses)])
 
                     y_pred_stddev_full_coverage = y_pred_stddev * 3.0
 
-                    error_bounds = [get_error(current_x_train_images, y_pred_mean + y_pred_stddev_full_coverage),
-                                    get_error(current_x_train_images, y_pred_mean - y_pred_stddev_full_coverage)]
+                    error_bounds = [get_error(current_x_train_images, y_pred_mean + y_pred_stddev_full_coverage,
+                                              current_x_train_padding_masks),
+                                    get_error(current_x_train_images, y_pred_mean - y_pred_stddev_full_coverage,
+                                              current_x_train_padding_masks)]
                     error_upper_bound = tf.reduce_max(error_bounds)
                     error_lower_bound = tf.reduce_min(error_bounds)
 
-                    error = get_error(current_x_train_images, y_pred_mean)
+                    error = get_error(current_x_train_images, y_pred_mean, current_x_train_padding_masks)
                     error_range = error_upper_bound - error_lower_bound
                 else:
-                    if discrete_bool:
-                        if i + 1 > mean_squared_error_epoch:
-                            with tf.GradientTape() as tape:
-                                y_pred, x_latent_quantised, x_latent_discretised = (
-                                    model([current_x_train_images, current_x_train_labels], training=True))
-
-                                y_pred = y_pred * current_x_train_padding_masks
-
-                                loss = tf.math.reduce_sum([root_mean_squared_error(current_x_train_images, y_pred),
-                                                           tf.math.reduce_sum(model.losses)])
-                        else:
-                            with tf.GradientTape() as tape:
-                                y_pred, x_latent_quantised, x_latent_discretised = (
-                                    model([current_x_train_images, current_x_train_labels], training=True))
-
-                                y_pred = y_pred * current_x_train_padding_masks
-
-                                loss = tf.math.reduce_sum([mean_squared_error(current_x_train_images, y_pred),
-                                                           tf.math.reduce_sum(model.losses)])
-                    else:
+                    if gaussian_latent_bool:
                         if i + 1 > mean_squared_error_epoch:
                             with tf.GradientTape() as tape:
                                 y_pred, y_latent_mean, y_latent_stddev = (
@@ -2596,12 +3204,11 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_t
                                            tf.random.normal((current_batch_size,) + latent_shape)],
                                           training=True))
 
-                                y_pred = y_pred * current_x_train_padding_masks
-
                                 loss = tf.math.reduce_sum([
-                                    root_mean_squared_error(current_x_train_images, y_pred),
-                                    gaussian_latent_loss_weight * gaussian_kullback_leibler_divergence(y_latent_mean,
-                                                                                                       y_latent_stddev),
+                                    root_mean_squared_error(current_x_train_images, y_pred,
+                                                            current_x_train_padding_masks),
+                                    gaussian_latent_loss_weight *
+                                    gaussian_kullback_leibler_divergence(y_latent_mean, y_latent_stddev),
                                     tf.math.reduce_sum(model.losses)])
                         else:
                             with tf.GradientTape() as tape:
@@ -2609,28 +3216,60 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_t
                                     model([current_x_train_images, current_x_train_labels,
                                            tf.random.normal((current_batch_size,) + latent_shape)], training=True))
 
-                                y_pred = y_pred * current_x_train_padding_masks
-
                                 loss = tf.math.reduce_mean([
-                                    mean_squared_error(current_x_train_images, y_pred),
-                                    gaussian_latent_loss_weight * mean_squared_error(tf.zeros(y_latent_mean.shape),
-                                                                                     y_latent_mean),
-                                    gaussian_latent_loss_weight * mean_squared_error(tf.ones(y_latent_stddev.shape),
-                                                                                     y_latent_stddev),
+                                    mean_squared_error(current_x_train_images, y_pred, current_x_train_padding_masks),
+                                        gaussian_latent_loss_weight *
+                                        gaussian_kullback_leibler_divergence(y_latent_mean, y_latent_stddev),
                                     tf.math.reduce_sum(model.losses)])
+                    else:
+                        if discrete_bool:
+                            if i + 1 > mean_squared_error_epoch:
+                                with tf.GradientTape() as tape:
+                                    y_pred, x_latent_quantised, x_latent_discretised = (
+                                        model([current_x_train_images, current_x_train_labels], training=True))
 
-                    error = get_error(current_x_train_images, y_pred)
+                                    loss = tf.math.reduce_sum([root_mean_squared_error(current_x_train_images, y_pred,
+                                                                                       current_x_train_padding_masks),
+                                                               tf.math.reduce_sum(model.losses)])
+                            else:
+                                with tf.GradientTape() as tape:
+                                    y_pred, x_latent_quantised, x_latent_discretised = (
+                                        model([current_x_train_images, current_x_train_labels], training=True))
+
+                                    loss = tf.math.reduce_sum([mean_squared_error(current_x_train_images, y_pred,
+                                                                                  current_x_train_padding_masks),
+                                                               tf.math.reduce_sum(model.losses)])
+                        else:
+                            if i + 1 > mean_squared_error_epoch:
+                                with tf.GradientTape() as tape:
+                                    y_pred, y_latent = model([current_x_train_images, current_x_train_labels],
+                                                             training=True)
+
+                                    loss = tf.math.reduce_sum([
+                                        root_mean_squared_error(current_x_train_images, y_pred,
+                                                                current_x_train_padding_masks),
+                                        tf.math.reduce_sum(model.losses)])
+                            else:
+                                with tf.GradientTape() as tape:
+                                    y_pred, y_latent = model([current_x_train_images, current_x_train_labels],
+                                                             training=True)
+
+                                    loss = tf.math.reduce_mean([
+                                        mean_squared_error(current_x_train_images, y_pred,
+                                                           current_x_train_padding_masks),
+                                        tf.math.reduce_sum(model.losses)])
+
+                    error = get_error(current_x_train_images, y_pred, current_x_train_padding_masks)
                     error_range = tf.constant(0.0)
             else:
                 with tf.GradientTape() as tape:
                     y_pred = model([current_x_train_images], training=True)
 
-                    y_pred = y_pred * current_x_train_padding_masks
-
-                    loss = tf.math.reduce_sum([mean_squared_error(current_x_train_images, y_pred),
+                    loss = tf.math.reduce_sum([mean_squared_error(current_x_train_images, y_pred,
+                                                                  current_x_train_padding_masks),
                                                tf.math.reduce_sum(model.losses)])
 
-                error = get_error(current_x_train_images, y_pred)
+                error = get_error(current_x_train_images, y_pred, current_x_train_padding_masks)
                 error_range = tf.constant(0.0)
 
             gradients = tape.gradient(loss, model.trainable_weights)
@@ -2649,22 +3288,37 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_t
                 str(i + 1), str(epochs), str(current_batch_size), str(j + 1), str(iterations), loss_name,
                 str(loss.numpy()), str(error.numpy()), str(error_range.numpy())))
 
-        validate(model, x_test_images, standard_scaler, x_test_labels, i + 1)
+        if use_ema and ema_overwrite_frequency is None:
+            optimiser.finalize_variable_values(model.trainable_variables)
+
+        validate(model, x_test_images, x_test_original_shapes, x_test_padding_masks, standard_scaler, x_test_labels,
+                 i + 1)
 
     return model
 
 
-def test(model, x_test_images, standard_scaler, x_test_labels):
+def test(model, x_test_images, x_test_original_shapes, x_test_padding_masks, standard_scaler, x_test_labels):
     print("test")
 
     test_output_path = "{0}/test/".format(output_path)
     mkdir_p(test_output_path)
+
+    if conv_bool and alex_bool and gaussian_latent_bool and not discrete_bool:
+        latent_size_x_test_image = get_data_from_storage(x_test_images[0])
+
+        latent_x_y_size = int(np.round(latent_size_x_test_image.shape[1] / np.power(2.0, len(filters) - 1.0)))
+        latent_shape = (latent_x_y_size, latent_x_y_size, filters[-1])
+    else:
+        latent_shape = None
 
     errors = []
 
     for i in range(int(np.floor(len(x_test_images) / test_batch_size))):
         current_x_test_images = []
         current_x_test_labels = []
+
+        current_x_test_original_shapes = []
+        current_x_test_padding_masks = []
 
         index = i * test_batch_size
 
@@ -2676,29 +3330,19 @@ def test(model, x_test_images, standard_scaler, x_test_labels):
             current_x_test_images.append(current_x_test_image)
             current_x_test_labels.append(x_test_labels[current_index])
 
+            current_x_test_original_shape = x_test_original_shapes[current_index]
+            current_x_test_padding_mask = get_data_from_storage(x_test_padding_masks[current_index])
+
+            current_x_test_original_shapes.append(current_x_test_original_shape)
+            current_x_test_padding_masks.append(current_x_test_padding_mask)
+
         current_x_test_images = tf.convert_to_tensor(current_x_test_images)
         current_x_test_labels = tf.convert_to_tensor(current_x_test_labels)
+        current_x_test_padding_masks = tf.convert_to_tensor(current_x_test_padding_masks)
 
         if conv_bool and alex_bool:
             if gaussian_negative_log_likelihood_bool:
-                if discrete_bool:
-                    y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
-                        model([current_x_test_images, current_x_test_labels], training=False))
-
-                    for j in range(test_batch_size):
-                        current_index = index + j
-
-                        current_y_pred_mean = y_pred_mean[j]
-                        output_image(current_y_pred_mean, standard_scaler,
-                                     "{0}/{1}_mean.png".format(test_output_path, str(current_index)))
-
-                    y_pred = []
-
-                    for j in range(int(tf.math.ceil(tf.math.reduce_max(y_pred_stddev) * 32.0))):
-                        y_pred.append(tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev))
-
-                    y_pred = tf.math.reduce_mean(y_pred, axis=0)
-                else:
+                if gaussian_latent_bool:
                     y_pred_mean, y_pred_stddev, y_latent_mean, y_latent_stddev = (
                         model([current_x_test_images, current_x_test_labels,
                                tf.random.normal((test_batch_size,) + latent_shape)], training=False))
@@ -2721,8 +3365,8 @@ def test(model, x_test_images, standard_scaler, x_test_labels):
                     for j in range(test_batch_size):
                         current_index = index + j
 
-                        current_y_pred_mean = y_pred_mean[j]
-                        output_image(current_y_pred_mean, standard_scaler,
+                        output_image(y_pred_mean[j], current_x_test_original_shapes[j],
+                                     current_x_test_padding_masks[j], standard_scaler,
                                      "{0}/{1}_mean.png".format(test_output_path, str(current_index)))
 
                     y_pred = []
@@ -2731,11 +3375,44 @@ def test(model, x_test_images, standard_scaler, x_test_labels):
                         y_pred.append(tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev))
 
                     y_pred = tf.math.reduce_mean(y_pred, axis=0)
-            else:
-                if discrete_bool:
-                    y_pred, x_latent_quantised, x_latent_discretised = (
-                        model([current_x_test_images, current_x_test_labels], training=False))
                 else:
+                    if discrete_bool:
+                        y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
+                            model([current_x_test_images, current_x_test_labels], training=False))
+
+                        for j in range(test_batch_size):
+                            current_index = index + j
+
+                            output_image(y_pred_mean[j], current_x_test_original_shapes[j],
+                                         current_x_test_padding_masks[j], standard_scaler,
+                                         "{0}/{1}_mean.png".format(test_output_path, str(current_index)))
+
+                        y_pred = []
+
+                        for j in range(int(tf.math.ceil(tf.math.reduce_max(y_pred_stddev) * 32.0))):
+                            y_pred.append(tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev))
+
+                        y_pred = tf.math.reduce_mean(y_pred, axis=0)
+                    else:
+                        y_pred_mean, y_pred_stddev, y_latent = (
+                            model([current_x_test_images, current_x_test_labels,
+                                   tf.random.normal((test_batch_size,) + latent_shape)], training=False))
+
+                        for j in range(test_batch_size):
+                            current_index = index + j
+
+                            output_image(y_pred_mean[j], current_x_test_original_shapes[j],
+                                         current_x_test_padding_masks[j], standard_scaler,
+                                         "{0}/{1}_mean.png".format(test_output_path, str(current_index)))
+
+                        y_pred = []
+
+                        for j in range(int(tf.math.ceil(tf.math.reduce_max(y_pred_stddev) * 32.0))):
+                            y_pred.append(tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev))
+
+                        y_pred = tf.math.reduce_mean(y_pred, axis=0)
+            else:
+                if gaussian_latent_bool:
                     y_pred, y_latent_mean, y_latent_stddev = (
                         model([current_x_test_images, current_x_test_labels,
                                tf.random.normal((test_batch_size,) + latent_shape)], training=False))
@@ -2751,21 +3428,24 @@ def test(model, x_test_images, standard_scaler, x_test_labels):
                         y_preds.append(y_pred)
 
                     y_pred = tf.math.reduce_mean(y_preds, axis=0)
+                else:
+                    if discrete_bool:
+                        y_pred, x_latent_quantised, x_latent_discretised = (
+                            model([current_x_test_images, current_x_test_labels], training=False))
+                    else:
+                        y_pred, y_latent = (model([current_x_test_images, current_x_test_labels], training=False))
         else:
             y_pred = model([current_x_test_images], training=False)
 
-        errors.append(get_error(current_x_test_images, y_pred))
+        errors.append(get_error(current_x_test_images, y_pred, current_x_test_padding_masks))
 
         for j in range(test_batch_size):
             current_index = index + j
 
-            current_y_pred = y_pred[j]
-            output_image(current_y_pred, standard_scaler, "{0}/{1}.png".format(test_output_path,
-                                                                               str(current_index)))
-
-            current_x_test_image = current_x_test_images[j]
-            output_image(current_x_test_image, standard_scaler, "{0}/{1}_input.png".format(test_output_path,
-                                                                                           str(current_index)))
+            output_image(y_pred[j], current_x_test_original_shapes[j], current_x_test_padding_masks[j], standard_scaler,
+                         "{0}/{1}.png".format(test_output_path, str(current_index)))
+            output_image(current_x_test_images[j], current_x_test_original_shapes[j], current_x_test_padding_masks[j],
+                         standard_scaler, "{0}/{1}_input.png".format(test_output_path, str(current_index)))
 
     error = tf.math.reduce_mean(errors)
 
@@ -2784,22 +3464,30 @@ def main():
         mkdir_p(output_path)
 
     x_train_images, x_test_images, x_train_labels, x_test_labels = get_input()
-    x_train_images, x_train_padding_masks, x_test_images, standard_scaler, x_train_labels, x_test_labels = (
+    (x_train_images, x_train_original_shapes, x_train_padding_masks, x_test_images, x_test_original_shapes,
+     x_test_padding_masks, standard_scaler, x_train_labels, x_test_labels) = (
         preprocess_input(x_train_images, x_test_images, x_train_labels, x_test_labels))
 
     if conv_bool:
         if alex_bool:
             if gaussian_negative_log_likelihood_bool:
-                if discrete_bool:
-                    model = get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images,
-                                                                                          x_train_labels)
+                if gaussian_latent_bool:
+                    model = get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train_images,
+                                                                                                 x_train_labels)
                 else:
-                    model = get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train_labels)
+                    if discrete_bool:
+                        model = get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images,
+                                                                                              x_train_labels)
+                    else:
+                        model = get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train_labels)
             else:
-                if discrete_bool:
-                    model = get_model_conv_alex_discrete(x_train_images, x_train_labels)
+                if gaussian_latent_bool:
+                    model = get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels)
                 else:
-                    model = get_model_conv_alex(x_train_images, x_train_labels)
+                    if discrete_bool:
+                        model = get_model_conv_alex_discrete(x_train_images, x_train_labels)
+                    else:
+                        model = get_model_conv_alex(x_train_images, x_train_labels)
         else:
             model = get_model_conv(x_train_images)
     else:
@@ -2812,23 +3500,24 @@ def main():
 
     optimiser = tf.keras.optimizers.Adam(learning_rate=learning_rate,
                                          weight_decay=weight_decay,
-                                         use_ema=True,
+                                         use_ema=use_ema,
                                          ema_overwrite_frequency=ema_overwrite_frequency)
 
     batch_sizes, batch_sizes_epochs = get_batch_sizes(x_train_images)
 
     if gradient_accumulation_bool:
         model = train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images,
-                                            x_train_padding_masks, x_test_images, standard_scaler, x_train_labels,
-                                            x_test_labels)
+                                            x_train_padding_masks, x_test_images, x_test_original_shapes,
+                                            x_test_padding_masks, standard_scaler, x_train_labels, x_test_labels)
     else:
         model = train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_train_padding_masks,
-                      x_test_images, standard_scaler, x_train_labels, x_test_labels)
+                      x_test_images, x_test_original_shapes, x_test_padding_masks, standard_scaler, x_train_labels,
+                      x_test_labels)
 
-    if epochs > 0:
+    if use_ema and epochs > 0:
         optimiser.finalize_variable_values(model.trainable_variables)
 
-    test(model, x_test_images, standard_scaler, x_test_labels)
+    test(model, x_test_images, x_test_original_shapes, x_test_padding_masks, standard_scaler, x_test_labels)
 
     return True
 
