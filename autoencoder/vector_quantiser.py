@@ -36,12 +36,14 @@ class VectorQuantiser(tf.keras.layers.Layer):
         return discretised
 
     def call(self, x, **kwargs):
-        standardised = tf.math.divide_no_nan(x, self.stddev) - self.mean
+        standardised = tf.math.divide_no_nan(x, tf.stop_gradient(self.stddev)) - tf.stop_gradient(self.mean)
 
         # You can learn more about adding losses to different layers here:
         # https://keras.io/guides/making_new_layers_and_models_via_subclassing/.
-        self.add_loss(tf.math.reduce_mean(tf.math.pow(tf.math.reduce_mean(x, axis=[1, 2, 3]) - self.mean, 2.0)))
-        self.add_loss(tf.math.reduce_mean(tf.math.pow(tf.math.reduce_std(x, axis=[1, 2, 3]) - self.stddev, 2.0)))
+        self.add_loss(tf.math.reduce_mean(tf.math.pow(
+            tf.math.reduce_mean(tf.stop_gradient(x), axis=[1, 2, 3]) - self.mean, 2.0)))
+        self.add_loss(tf.math.reduce_mean(tf.math.pow(
+            tf.math.reduce_std(tf.stop_gradient(x), axis=[1, 2, 3]) - self.stddev, 2.0)))
 
         standardised = einops.rearrange(standardised, "b h w c -> b c (h w)")
 
@@ -61,7 +63,7 @@ class VectorQuantiser(tf.keras.layers.Layer):
         quantised = einops.rearrange(quantised, "b c (h w) -> b h w c", w=x.shape[2])
         discretised = tf.reshape(discretised, [-1, quantised.shape[-1]])
 
-        quantised = (quantised + self.mean) * self.stddev
+        quantised = (quantised + tf.stop_gradient(self.mean)) * tf.stop_gradient(self.stddev)
 
         # Straight-through estimator.
         quantised = x + tf.stop_gradient(quantised - x)
