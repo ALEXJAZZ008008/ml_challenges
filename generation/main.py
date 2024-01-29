@@ -7,6 +7,7 @@ import os
 import shutil
 import errno
 import random
+import copy
 import numpy as np
 import scipy
 from skimage.color import rgb2gray
@@ -29,27 +30,26 @@ np.seterr(all="print")
 dataset_name = "mnist"
 output_path = "../output/generation/"
 
-read_data_from_storage_bool = False
+read_data_from_storage_bool = True
 
-preprocess_list_bool = False
+preprocess_list_bool = True
 greyscale_bool = True
 
 alex_bool = True
 image_input_bool = True
 
 if alex_bool:
-    min_output_dimension_size = 4
-    max_output_dimension_size = 32
+    min_output_dimension_size = 256
+    max_output_dimension_size = 256
 
     conditional_dense_layers = 2
     filters = [64, 128, 256, 512, 1024]
     conv_layers = [2, 2, 2, 2, 2]
     num_heads = [4, 4, 4, 4, 4]
     key_dim = [32, 32, 32, 32, 32]
-    image_input_bottleneck_units_divider = 2
 else:
-    min_output_dimension_size = 4
-    max_output_dimension_size = 32
+    min_output_dimension_size = 256
+    max_output_dimension_size = 256
 
     filters = [64, 128, 256, 512]
     num_heads = 4
@@ -58,12 +58,14 @@ else:
 if alex_bool:
     learning_rate = 1e-04
     weight_decay = 0.0
+    use_ema = True
     ema_overwrite_frequency = None
 else:
     learning_rate = 1e-04
+    use_ema = True
     ema_overwrite_frequency = 10
 
-gradient_accumulation_bool = False
+gradient_accumulation_bool = True
 
 epochs = 256
 
@@ -137,6 +139,7 @@ def get_input():
 
     dataset_train = dataset["train"]
     dataset_test = dataset["test"]
+    # dataset_test = dataset["validation"]
 
     x_train_images = []
     x_test_images = []
@@ -182,18 +185,22 @@ def get_input():
 def get_data_from_storage(data):
     if read_data_from_storage_bool:
         with open(data, "rb") as file:
-            data = pickle.load(file)
+            data_from_storage = pickle.load(file)
+    else:
+        data_from_storage = copy.deepcopy(data)
 
-    return data
+    return data_from_storage
 
 
-def get_next_geometric_value(an, a0):
-    n = np.log2(an / a0) + 1
+def get_next_geometric_value(value, base):
+    power = np.log2(value / base) + 1
 
-    if not n.is_integer():
-        an = a0 * np.power(2.0, (np.ceil(n) - 1.0))
+    if not power.is_integer():
+        next_value = base * np.power(2.0, (np.ceil(power) - 1.0))
+    else:
+        next_value = value
 
-    return an
+    return next_value
 
 
 def get_positional_encodings(shape):
@@ -224,13 +231,17 @@ def set_data_from_storage(data, current_output_path):
         with open(current_output_path, "wb") as file:
             pickle.dump(data, file)
 
-        data = current_output_path
+        data_from_storage = current_output_path
+    else:
+        data_from_storage = copy.deepcopy(data)
 
-    return data
+    return data_from_storage
 
 
 def convert_rgb_to_greyscale(images):
     print("convert_rgb_to_greyscale")
+
+    greyscale_images = []
 
     for i in range(len(images)):
         image = get_data_from_storage(images[i])
@@ -239,9 +250,9 @@ def convert_rgb_to_greyscale(images):
             image = rgb2gray(image)
             image = np.expand_dims(image, axis=-1)
 
-        images[i] = set_data_from_storage(image, images[i])
+        greyscale_images.append(set_data_from_storage(image, images[i]))
 
-    return images
+    return greyscale_images
 
 
 def rescale_images_list(images):
@@ -266,8 +277,10 @@ def rescale_images_list(images):
             output_dimension_size = min_output_dimension_size
 
     if max_output_dimension_size is not None:
-        if output_dimension_size > max_output_dimension_size:  # noqa
+        if output_dimension_size > max_output_dimension_size:
             output_dimension_size = max_output_dimension_size
+
+    rescaled_images = []
 
     for i in range(images_len):
         image = get_data_from_storage(images[i])
@@ -275,9 +288,9 @@ def rescale_images_list(images):
         image = rescale(image, output_dimension_size / np.max(image.shape[:-1]), order=3, preserve_range=True,
                         channel_axis=-1)
 
-        images[i] = set_data_from_storage(image, images[i])
+        rescaled_images.append(set_data_from_storage(image, images[i]))
 
-    return images
+    return rescaled_images
 
 
 def normalise_images_list(x_train_images, x_test_images):
@@ -292,6 +305,8 @@ def normalise_images_list(x_train_images, x_test_images):
 
         standard_scaler.partial_fit(np.reshape(current_x_train_images, (-1, 1)))
 
+    normalised_x_train_images = []
+
     for i in range(x_train_images_len):
         current_x_train_images = get_data_from_storage(x_train_images[i])
 
@@ -299,7 +314,9 @@ def normalise_images_list(x_train_images, x_test_images):
                                                                                  (-1, 1))),
                                             current_x_train_images.shape)
 
-        x_train_images[i] = set_data_from_storage(current_x_train_images, x_train_images[i])
+        normalised_x_train_images.append(set_data_from_storage(current_x_train_images, x_train_images[i]))
+
+    normalised_x_test_images = []
 
     for i in range(len(x_test_images)):
         current_x_test_images = get_data_from_storage(x_test_images[i])
@@ -308,33 +325,37 @@ def normalise_images_list(x_train_images, x_test_images):
                                                                                 (-1, 1))),
                                            current_x_test_images.shape)
 
-        x_test_images[i] = set_data_from_storage(current_x_test_images, x_test_images[i])
+        normalised_x_test_images.append(set_data_from_storage(current_x_test_images, x_test_images[i]))
 
-    return x_train_images, x_test_images, standard_scaler
+    return normalised_x_train_images, normalised_x_test_images, standard_scaler
 
 
 def pad_image(image, output_dimension_size):
-    while image.shape[0] + 1 < output_dimension_size:
-        image = np.pad(image, ((1, 1), (0, 0), (0, 0)))  # noqa
+    padded_image = copy.deepcopy(image)
 
-    if image.shape[0] < output_dimension_size:
-        image = np.pad(image, ((0, 1), (0, 0), (0, 0)))  # noqa
+    while padded_image.shape[0] + 1 < output_dimension_size:
+        padded_image = np.pad(padded_image, ((1, 1), (0, 0), (0, 0)))  # noqa
 
-    while image.shape[1] + 1 < output_dimension_size:
-        image = np.pad(image, ((0, 0), (1, 1), (0, 0)))  # noqa
+    if padded_image.shape[0] < output_dimension_size:
+        padded_image = np.pad(padded_image, ((0, 1), (0, 0), (0, 0)))  # noqa
 
-    if image.shape[1] < output_dimension_size:
-        image = np.pad(image, ((0, 0), (0, 1), (0, 0)))  # noqa
+    while padded_image.shape[1] + 1 < output_dimension_size:
+        padded_image = np.pad(padded_image, ((0, 0), (1, 1), (0, 0)))  # noqa
 
-    return image
+    if padded_image.shape[1] < output_dimension_size:
+        padded_image = np.pad(padded_image, ((0, 0), (0, 1), (0, 0)))  # noqa
+
+    return padded_image
 
 
-def pad_images_list(images):
+def pad_images_list(images, current_output_path):
     print("pad_images")
 
     max_dimension_size = -1
 
-    for i in range(len(images)):
+    images_len = len(images)
+
+    for i in range(images_len):
         image = get_data_from_storage(images[i])
 
         current_max_dimension_size = np.max(image.shape[:-1])
@@ -344,44 +365,106 @@ def pad_images_list(images):
 
     output_dimension_size = get_next_geometric_value(max_dimension_size, 2.0)
 
+    padded_images = []
+    original_shapes = []
+    padding_masks = []
+
+    for i in range(images_len):
+        image = get_data_from_storage(images[i])
+
+        padding_mask = np.ones(image.shape, dtype=np.float32)
+
+        original_shapes.append(image.shape)
+        image = pad_image(image, output_dimension_size)
+
+        padding_mask = pad_image(padding_mask, output_dimension_size)
+
+        padded_images.append(set_data_from_storage(image, images[i]))
+
+        if read_data_from_storage_bool:
+            images_split = images[i].strip().split('.')
+            padding_masks.append("{0}/{1}_padding_mask.{2}".format(current_output_path, images_split[2],
+                                                                   images_split[3]))
+
+        padding_masks.append(set_data_from_storage(padding_mask, padding_masks[i]))
+
+    return padded_images, original_shapes, padding_masks
+
+
+def convert_to_boolean_mask_list(images):
+    print("convert_to_boolean_mask_list")
+
+    boolean_masks = []
+
     for i in range(len(images)):
         image = get_data_from_storage(images[i])
 
-        image = pad_image(image, output_dimension_size)
+        image = image.astype(bool)
 
-        images[i] = set_data_from_storage(image, images[i])
+        boolean_masks.append(set_data_from_storage(image, images[i]))
 
-    return images
+    return boolean_masks
 
 
 def convert_images_to_tensor_list(images):
     print("convert_images_to_tensor")
+
+    tensors = []
 
     for i in range(len(images)):
         image = get_data_from_storage(images[i])
 
         image = tf.convert_to_tensor(image)
 
-        images[i] = set_data_from_storage(image, images[i])
+        tensors.append(set_data_from_storage(image, images[i]))
 
-    return images
+    return tensors
 
 
 def preprocess_images_list(x_train_images, x_test_images):
     print("preprocess_images")
 
-    x_train_images = rescale_images_list(x_train_images)
-    x_test_images = rescale_images_list(x_test_images)
+    x_train_images_preprocessed = rescale_images_list(x_train_images)
+    x_test_images_preprocessed = rescale_images_list(x_test_images)
 
-    x_train_images, x_test_images, standard_scaler = normalise_images_list(x_train_images, x_test_images)
+    x_train_images_preprocessed, x_test_images_preprocessed, standard_scaler = (
+        normalise_images_list(x_train_images_preprocessed, x_test_images_preprocessed))
 
-    x_train_images = pad_images_list(x_train_images)
-    x_test_images = pad_images_list(x_test_images)
+    x_train_padding_masks_output_path = "{0}/x_train_padding_masks/".format(output_path)
+    x_test_padding_masks_output_path = "{0}/x_train_padding_masks/".format(output_path)
 
-    x_train_images = convert_images_to_tensor_list(x_train_images)
-    x_test_images = convert_images_to_tensor_list(x_test_images)
+    x_train_images_preprocessed, x_train_original_shapes, x_train_padding_masks = (
+        pad_images_list(x_train_images_preprocessed, x_train_padding_masks_output_path))
+    x_test_images_preprocessed, x_test_original_shapes, x_test_padding_masks = (
+        pad_images_list(x_test_images_preprocessed, x_test_padding_masks_output_path))
 
-    return x_train_images, x_test_images, standard_scaler
+    if read_data_from_storage_bool:
+        x_train_images_preprocessed = convert_images_to_tensor_list(x_train_images_preprocessed)
+        x_test_images_preprocessed = convert_images_to_tensor_list(x_test_images_preprocessed)
+
+        x_train_padding_masks = convert_to_boolean_mask_list(x_train_padding_masks)
+        x_test_padding_masks = convert_to_boolean_mask_list(x_test_padding_masks)
+
+        x_train_padding_masks = convert_images_to_tensor_list(x_train_padding_masks)
+        x_test_padding_masks = convert_images_to_tensor_list(x_test_padding_masks)
+    else:
+        x_train_images_preprocessed = np.array(x_train_images_preprocessed)
+        x_test_images_preprocessed = np.array(x_test_images_preprocessed)
+
+        x_train_padding_masks = np.array(x_train_padding_masks)
+        x_test_padding_masks = np.array(x_test_padding_masks)
+
+        x_train_images_preprocessed = tf.convert_to_tensor(x_train_images_preprocessed)
+        x_test_images_preprocessed = tf.convert_to_tensor(x_test_images_preprocessed)
+
+        x_train_padding_masks = x_train_padding_masks.astype(bool)
+        x_test_padding_masks = x_test_padding_masks.astype(bool)
+
+        x_train_padding_masks = tf.convert_to_tensor(x_train_padding_masks)
+        x_test_padding_masks = tf.convert_to_tensor(x_test_padding_masks)
+
+    return (x_train_images_preprocessed, x_train_original_shapes, x_train_padding_masks, x_test_images_preprocessed,
+            x_test_original_shapes, x_test_padding_masks, standard_scaler)
 
 
 def rescale_images_array(images):
@@ -404,9 +487,9 @@ def rescale_images_array(images):
         rescaled_images.append(rescale(images[i], output_dimension_size / max_dimension_size, order=3,
                                        preserve_range=True, channel_axis=-1))
 
-    images = np.array(rescaled_images)
+    rescaled_images = np.array(rescaled_images)
 
-    return images
+    return rescaled_images
 
 
 def normalise_images_array(x_train_images, x_test_images):
@@ -1020,7 +1103,7 @@ def get_model_conv_alex(x_train_images, x_train_labels):
 
         x_skip = x
 
-        if num_heads[i] is not None:
+        if num_heads[i] is not None and key_dim[i] is not None:
             x_res = x_skip
 
             x = Standardiser()(x)
@@ -1125,7 +1208,7 @@ def get_model_conv_alex(x_train_images, x_train_labels):
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
     x = tf.keras.layers.Add()([x, x_res])
 
-    if num_heads[-1] is not None:
+    if num_heads[-1] is not None and key_dim[-1] is not None:
         x_res = x
 
         x = Standardiser()(x)
@@ -1395,7 +1478,7 @@ def get_model_conv_alex_image_input(x_train_images, x_train_labels):
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x_image = tf.keras.layers.Add()([x_image, x_res])
 
-        # if num_heads[-1] is not None:
+        # if num_heads[-1] is not None and key_dim[-1] is not None:
         #     x_res = x_image
 
         #     x_image = Standardiser()(x_image)
@@ -1455,12 +1538,12 @@ def get_model_conv_alex_image_input(x_train_images, x_train_labels):
         #                                    kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         #     x_image = tf.keras.layers.Add()([x_image, x_res])
 
-    x_image = tf.keras.layers.GlobalAvgPool2D()(x_image)
-
-    x_image_bottleneck_size = int(np.ceil(x_image.shape[-1] / image_input_bottleneck_units_divider))
-    x_image = tf.keras.layers.Dense(units=x_image_bottleneck_size,
-                                    kernel_initializer=tf.keras.initializers.orthogonal)(x_image)
-
+    x_image = tf.keras.layers.Conv2D(filters=filters[-1],
+                                     kernel_size=(3, 3),
+                                     strides=(1, 1),
+                                     padding="same",
+                                     kernel_initializer=tf.keras.initializers.orthogonal)(x_image)
+    x_image = tf.keras.layers.GlobalMaxPool2D()(x_image)
     x_image = tf.keras.layers.Dense(units=filters[-1],
                                     kernel_initializer=tf.keras.initializers.orthogonal)(x_image)
 
@@ -1543,7 +1626,7 @@ def get_model_conv_alex_image_input(x_train_images, x_train_labels):
 
         x_skip = x
 
-        if num_heads[i] is not None:
+        if num_heads[i] is not None and key_dim[i] is not None:
             x_res = x_skip
 
             for j in range(conv_layers[i]):
@@ -1692,7 +1775,7 @@ def get_model_conv_alex_image_input(x_train_images, x_train_labels):
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
     x = tf.keras.layers.Add()([x, x_res])
 
-    if num_heads[-1] is not None:
+    if num_heads[-1] is not None and key_dim[-1] is not None:
         x_res = x
 
         x = Standardiser()(x)
@@ -2224,6 +2307,9 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
                 str(i + 1), str(epochs), str(current_batch_size), str(j + 1), str(iterations), loss_name,
                 str(loss.numpy()), str(error.numpy())))
 
+        if use_ema and ema_overwrite_frequency is None:
+            optimiser.finalize_variable_values(model.trainable_variables)
+
         validate(model, beta, alpha, alpha_bar, sqrt_alpha_bar, one_minus_sqrt_alpha_bar, x_test_images,
                  standard_scaler, x_timestep_encodings, x_test_labels, i + 1)
 
@@ -2385,6 +2471,9 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, beta, alpha, alpha_
                 str(i + 1), str(epochs), str(current_batch_size), str(j + 1), str(iterations), loss_name,
                 str(loss.numpy()), str(error.numpy())))
 
+        if use_ema and ema_overwrite_frequency is None:
+            optimiser.finalize_variable_values(model.trainable_variables)
+
         validate(model, beta, alpha, alpha_bar, sqrt_alpha_bar, one_minus_sqrt_alpha_bar, x_test_images,
                  standard_scaler, x_timestep_encodings, x_test_labels, i + 1)
 
@@ -2510,13 +2599,13 @@ def main():
     if alex_bool:
         optimiser = tf.keras.optimizers.Adam(learning_rate=learning_rate,
                                              weight_decay=weight_decay,
-                                             use_ema=True,
+                                             use_ema=use_ema,
                                              ema_overwrite_frequency=ema_overwrite_frequency)
     else:
         optimiser = tf.keras.optimizers.Adam(learning_rate=learning_rate,
                                              beta_1=0.9,
                                              beta_2=0.99,
-                                             use_ema=True,
+                                             use_ema=use_ema,
                                              ema_momentum=0.995,
                                              ema_overwrite_frequency=ema_overwrite_frequency)
 
@@ -2538,7 +2627,7 @@ def main():
                       one_minus_sqrt_alpha_bar, x_train_images, x_test_images, standard_scaler, x_timestep_encodings,
                       x_train_labels, x_test_labels)
 
-    if epochs > 0:
+    if use_ema and epochs > 0:
         optimiser.finalize_variable_values(model.trainable_variables)
 
     test(model, beta, alpha, alpha_bar, sqrt_alpha_bar, one_minus_sqrt_alpha_bar, x_test_images, standard_scaler,

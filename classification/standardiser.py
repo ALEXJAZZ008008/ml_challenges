@@ -17,9 +17,11 @@ class Standardiser(tf.keras.layers.Layer):
         self.stddev = tf.Variable(initial_value=initialiser(shape=(1,)), trainable=True)
 
     def call(self, x, **kwargs):
-        standardised = tf.math.divide_no_nan(x, self.stddev) - self.mean
+        standardised = tf.math.divide_no_nan(x, tf.stop_gradient(self.stddev)) - tf.stop_gradient(self.mean)
 
-        self.add_loss(tf.math.reduce_mean(tf.math.pow(tf.math.reduce_mean(x, axis=[1, 2, 3]) - self.mean, 2.0)))
-        self.add_loss(tf.math.reduce_mean(tf.math.pow(tf.math.reduce_std(x, axis=[1, 2, 3]) - self.stddev, 2.0)))
+        self.add_loss(tf.math.reduce_mean(tf.math.pow(
+            tf.math.reduce_mean(tf.stop_gradient(x), axis=[1, 2, 3]) - self.mean, 2.0)))
+        self.add_loss(tf.math.reduce_mean(tf.math.pow(
+            tf.math.reduce_std(tf.stop_gradient(x), axis=[1, 2, 3]) - self.stddev, 2.0)))
 
         return standardised

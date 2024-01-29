@@ -175,9 +175,11 @@ def get_input():
 def get_data_from_storage(data):
     if read_data_from_storage_bool:
         with open(data, "rb") as file:
-            data = pickle.load(file)
+            data_from_storage = pickle.load(file)
+    else:
+        data_from_storage = copy.deepcopy(data)
 
-    return data
+    return data_from_storage
 
 
 def set_data_from_storage(data, current_output_path):
@@ -185,13 +187,17 @@ def set_data_from_storage(data, current_output_path):
         with open(current_output_path, "wb") as file:
             pickle.dump(data, file)
 
-        data = current_output_path
+        data_from_storage = current_output_path
+    else:
+        data_from_storage = copy.deepcopy(data)
 
-    return data
+    return data_from_storage
 
 
 def convert_rgb_to_greyscale(images):
     print("convert_rgb_to_greyscale")
+
+    greyscale_images = []
 
     for i in range(len(images)):
         image = get_data_from_storage(images[i])
@@ -200,9 +206,9 @@ def convert_rgb_to_greyscale(images):
             image = rgb2gray(image)
             image = np.expand_dims(image, axis=-1)
 
-        images[i] = set_data_from_storage(image, images[i])
+        greyscale_images.append(set_data_from_storage(image, images[i]))
 
-    return images
+    return greyscale_images
 
 
 def get_next_geometric_value(value, base):
@@ -241,15 +247,17 @@ def rescale_images_list(images):
         if output_dimension_size > max_output_dimension_size:
             output_dimension_size = max_output_dimension_size
 
+    rescaled_images = []
+
     for i in range(images_len):
         image = get_data_from_storage(images[i])
 
         image = rescale(image, output_dimension_size / np.max(image.shape[:-1]), order=3, preserve_range=True,
                         channel_axis=-1)
 
-        images[i] = set_data_from_storage(image, images[i])
+        rescaled_images.append(set_data_from_storage(image, images[i]))
 
-    return images
+    return rescaled_images
 
 
 def normalise_images_list(x_train_images, x_test_images):
@@ -264,6 +272,8 @@ def normalise_images_list(x_train_images, x_test_images):
 
         standard_scaler.partial_fit(np.reshape(current_x_train_images, (-1, 1)))
 
+    normalised_x_train_images = []
+
     for i in range(x_train_images_len):
         current_x_train_images = get_data_from_storage(x_train_images[i])
 
@@ -271,7 +281,9 @@ def normalise_images_list(x_train_images, x_test_images):
                                                                                  (-1, 1))),
                                             current_x_train_images.shape)
 
-        x_train_images[i] = set_data_from_storage(current_x_train_images, x_train_images[i])
+        normalised_x_train_images.append(set_data_from_storage(current_x_train_images, x_train_images[i]))
+
+    normalised_x_test_images = []
 
     for i in range(len(x_test_images)):
         current_x_test_images = get_data_from_storage(x_test_images[i])
@@ -280,33 +292,37 @@ def normalise_images_list(x_train_images, x_test_images):
                                                                                 (-1, 1))),
                                            current_x_test_images.shape)
 
-        x_test_images[i] = set_data_from_storage(current_x_test_images, x_test_images[i])
+        normalised_x_test_images.append(set_data_from_storage(current_x_test_images, x_test_images[i]))
 
-    return x_train_images, x_test_images, standard_scaler
+    return normalised_x_train_images, normalised_x_test_images, standard_scaler
 
 
 def pad_image(image, output_dimension_size):
-    while image.shape[0] + 1 < output_dimension_size:
-        image = np.pad(image, ((1, 1), (0, 0), (0, 0)))  # noqa
+    padded_image = copy.deepcopy(image)
 
-    if image.shape[0] < output_dimension_size:
-        image = np.pad(image, ((0, 1), (0, 0), (0, 0)))  # noqa
+    while padded_image.shape[0] + 1 < output_dimension_size:
+        padded_image = np.pad(padded_image, ((1, 1), (0, 0), (0, 0)))  # noqa
 
-    while image.shape[1] + 1 < output_dimension_size:
-        image = np.pad(image, ((0, 0), (1, 1), (0, 0)))  # noqa
+    if padded_image.shape[0] < output_dimension_size:
+        padded_image = np.pad(padded_image, ((0, 1), (0, 0), (0, 0)))  # noqa
 
-    if image.shape[1] < output_dimension_size:
-        image = np.pad(image, ((0, 0), (0, 1), (0, 0)))  # noqa
+    while padded_image.shape[1] + 1 < output_dimension_size:
+        padded_image = np.pad(padded_image, ((0, 0), (1, 1), (0, 0)))  # noqa
 
-    return image
+    if padded_image.shape[1] < output_dimension_size:
+        padded_image = np.pad(padded_image, ((0, 0), (0, 1), (0, 0)))  # noqa
+
+    return padded_image
 
 
-def pad_images_list(images):
+def pad_images_list(images, current_output_path):
     print("pad_images")
 
     max_dimension_size = -1
 
-    for i in range(len(images)):
+    images_len = len(images)
+
+    for i in range(images_len):
         image = get_data_from_storage(images[i])
 
         current_max_dimension_size = np.max(image.shape[:-1])
@@ -316,10 +332,11 @@ def pad_images_list(images):
 
     output_dimension_size = get_next_geometric_value(max_dimension_size, 2.0)
 
+    padded_images = []
     original_shapes = []
-    padding_masks = copy.deepcopy(images)
+    padding_masks = []
 
-    for i in range(len(images)):
+    for i in range(images_len):
         image = get_data_from_storage(images[i])
 
         padding_mask = np.ones(image.shape, dtype=np.float32)
@@ -329,58 +346,68 @@ def pad_images_list(images):
 
         padding_mask = pad_image(padding_mask, output_dimension_size)
 
-        images[i] = set_data_from_storage(image, images[i])
+        padded_images.append(set_data_from_storage(image, images[i]))
 
         if read_data_from_storage_bool:
-            current_padding_masks_split = padding_masks[i].strip().split('.')
-            padding_masks[i] = "../{0}_padding_mask.{1}".format(current_padding_masks_split[2],
-                                                                current_padding_masks_split[3])
+            images_split = images[i].strip().split('.')
+            padding_masks.append("{0}/{1}_padding_mask.{2}".format(current_output_path, images_split[2],
+                                                                   images_split[3]))
 
-        padding_masks[i] = set_data_from_storage(padding_mask, padding_masks[i])
+        padding_masks.append(set_data_from_storage(padding_mask, padding_masks[i]))
 
-    return images, original_shapes, padding_masks
+    return padded_images, original_shapes, padding_masks
 
 
 def convert_to_boolean_mask_list(images):
     print("convert_to_boolean_mask_list")
+
+    boolean_masks = []
 
     for i in range(len(images)):
         image = get_data_from_storage(images[i])
 
         image = image.astype(bool)
 
-        images[i] = set_data_from_storage(image, images[i])
+        boolean_masks.append(set_data_from_storage(image, images[i]))
 
-    return images
+    return boolean_masks
 
 
 def convert_images_to_tensor_list(images):
     print("convert_images_to_tensor")
+
+    tensors = []
 
     for i in range(len(images)):
         image = get_data_from_storage(images[i])
 
         image = tf.convert_to_tensor(image)
 
-        images[i] = set_data_from_storage(image, images[i])
+        tensors.append(set_data_from_storage(image, images[i]))
 
-    return images
+    return tensors
 
 
 def preprocess_images_list(x_train_images, x_test_images):
     print("preprocess_images")
 
-    x_train_images = rescale_images_list(x_train_images)
-    x_test_images = rescale_images_list(x_test_images)
+    x_train_images_preprocessed = rescale_images_list(x_train_images)
+    x_test_images_preprocessed = rescale_images_list(x_test_images)
 
-    x_train_images, x_test_images, standard_scaler = normalise_images_list(x_train_images, x_test_images)
+    x_train_images_preprocessed, x_test_images_preprocessed, standard_scaler = (
+        normalise_images_list(x_train_images_preprocessed, x_test_images_preprocessed))
 
-    x_train_images, x_train_original_shapes, x_train_padding_masks = pad_images_list(x_train_images)
-    x_test_images, x_test_original_shapes, x_test_padding_masks = pad_images_list(x_test_images)
+    x_train_padding_masks_output_path = "{0}/x_train_padding_masks/".format(output_path)
+    x_test_padding_masks_output_path = "{0}/x_train_padding_masks/".format(output_path)
+
+    x_train_images_preprocessed, x_train_original_shapes, x_train_padding_masks = (
+        pad_images_list(x_train_images_preprocessed, x_train_padding_masks_output_path))
+    x_test_images_preprocessed, x_test_original_shapes, x_test_padding_masks = (
+        pad_images_list(x_test_images_preprocessed, x_test_padding_masks_output_path))
 
     if read_data_from_storage_bool:
-        x_train_images = convert_images_to_tensor_list(x_train_images)
-        x_test_images = convert_images_to_tensor_list(x_test_images)
+        x_train_images_preprocessed = convert_images_to_tensor_list(x_train_images_preprocessed)
+        x_test_images_preprocessed = convert_images_to_tensor_list(x_test_images_preprocessed)
 
         x_train_padding_masks = convert_to_boolean_mask_list(x_train_padding_masks)
         x_test_padding_masks = convert_to_boolean_mask_list(x_test_padding_masks)
@@ -388,14 +415,14 @@ def preprocess_images_list(x_train_images, x_test_images):
         x_train_padding_masks = convert_images_to_tensor_list(x_train_padding_masks)
         x_test_padding_masks = convert_images_to_tensor_list(x_test_padding_masks)
     else:
-        x_train_images = np.array(x_train_images)
-        x_test_images = np.array(x_test_images)
+        x_train_images_preprocessed = np.array(x_train_images_preprocessed)
+        x_test_images_preprocessed = np.array(x_test_images_preprocessed)
 
         x_train_padding_masks = np.array(x_train_padding_masks)
         x_test_padding_masks = np.array(x_test_padding_masks)
 
-        x_train_images = tf.convert_to_tensor(x_train_images)
-        x_test_images = tf.convert_to_tensor(x_test_images)
+        x_train_images_preprocessed = tf.convert_to_tensor(x_train_images_preprocessed)
+        x_test_images_preprocessed = tf.convert_to_tensor(x_test_images_preprocessed)
 
         x_train_padding_masks = x_train_padding_masks.astype(bool)
         x_test_padding_masks = x_test_padding_masks.astype(bool)
@@ -403,8 +430,8 @@ def preprocess_images_list(x_train_images, x_test_images):
         x_train_padding_masks = tf.convert_to_tensor(x_train_padding_masks)
         x_test_padding_masks = tf.convert_to_tensor(x_test_padding_masks)
 
-    return (x_train_images, x_train_original_shapes, x_train_padding_masks, x_test_images, x_test_original_shapes,
-            x_test_padding_masks, standard_scaler)
+    return (x_train_images_preprocessed, x_train_original_shapes, x_train_padding_masks, x_test_images_preprocessed,
+            x_test_original_shapes, x_test_padding_masks, standard_scaler)
 
 
 def rescale_images_array(images):
@@ -427,9 +454,9 @@ def rescale_images_array(images):
         rescaled_images.append(rescale(images[i], output_dimension_size / max_dimension_size, order=3,
                                        preserve_range=True, channel_axis=-1))
 
-    images = np.array(rescaled_images)
+    rescaled_images = np.array(rescaled_images)
 
-    return images
+    return rescaled_images
 
 
 def normalise_images_array(x_train_images, x_test_images):
@@ -437,12 +464,12 @@ def normalise_images_array(x_train_images, x_test_images):
 
     standard_scaler = StandardScaler()
 
-    x_train_images = np.reshape(standard_scaler.fit_transform(np.reshape(x_train_images, (-1, 1))),
-                                x_train_images.shape)
-    x_test_images = np.reshape(standard_scaler.transform(np.reshape(x_test_images, (-1, 1))),
-                               x_test_images.shape)
+    normalised_x_train_images = np.reshape(standard_scaler.fit_transform(np.reshape(x_train_images, (-1, 1))),
+                                           x_train_images.shape)
+    normalised_x_test_images = np.reshape(standard_scaler.transform(np.reshape(x_test_images, (-1, 1))),
+                                          x_test_images.shape)
 
-    return x_train_images, x_test_images, standard_scaler
+    return normalised_x_train_images, normalised_x_test_images, standard_scaler
 
 
 def pad_images_array(images):
@@ -451,46 +478,49 @@ def pad_images_array(images):
     max_dimension_size = np.max(images.shape[1:-1])
     output_dimension_size = get_next_geometric_value(max_dimension_size, 2.0)
 
-    while images.shape[1] + 1 < output_dimension_size:
-        images = np.pad(images, ((0, 0), (1, 1), (0, 0), (0, 0)))  # noqa
+    padded_images = copy.deepcopy(images)
 
-    if images.shape[1] < output_dimension_size:
-        images = np.pad(images, ((0, 0), (0, 1), (0, 0), (0, 0)))  # noqa
+    while padded_images.shape[1] + 1 < output_dimension_size:
+        padded_images = np.pad(padded_images, ((0, 0), (1, 1), (0, 0), (0, 0)))  # noqa
 
-    while images.shape[2] + 1 < output_dimension_size:
-        images = np.pad(images, ((0, 0,), (0, 0), (1, 1), (0, 0)))  # noqa
+    if padded_images.shape[1] < output_dimension_size:
+        padded_images = np.pad(padded_images, ((0, 0), (0, 1), (0, 0), (0, 0)))  # noqa
 
-    if images.shape[2] < output_dimension_size:
-        images = np.pad(images, ((0, 0), (0, 0), (0, 1), (0, 0)))  # noqa
+    while padded_images.shape[2] + 1 < output_dimension_size:
+        padded_images = np.pad(padded_images, ((0, 0,), (0, 0), (1, 1), (0, 0)))  # noqa
 
-    return images
+    if padded_images.shape[2] < output_dimension_size:
+        padded_images = np.pad(padded_images, ((0, 0), (0, 0), (0, 1), (0, 0)))  # noqa
+
+    return padded_images
 
 
 def preprocess_images_array(x_train_images, x_test_images):
     print("preprocess_images")
 
-    x_train_images = np.array(x_train_images)
-    x_test_images = np.array(x_test_images)
+    x_train_images_preprocessed = np.array(x_train_images)
+    x_test_images_preprocessed = np.array(x_test_images)
 
-    x_train_images = rescale_images_array(x_train_images)
-    x_test_images = rescale_images_array(x_test_images)
+    x_train_images_preprocessed = rescale_images_array(x_train_images_preprocessed)
+    x_test_images_preprocessed = rescale_images_array(x_test_images_preprocessed)
 
-    x_train_images, x_test_images, standard_scaler = normalise_images_array(x_train_images, x_test_images)
+    x_train_images_preprocessed, x_test_images_preprocessed, standard_scaler = (
+        normalise_images_array(x_train_images_preprocessed, x_test_images_preprocessed))
 
-    x_train_original_shapes = x_train_images.shape
-    x_test_original_shapes = x_test_images.shape
+    x_train_original_shapes = x_train_images_preprocessed.shape
+    x_test_original_shapes = x_test_images_preprocessed.shape
 
-    x_train_padding_masks = np.ones(x_train_images.shape, dtype=np.float32)
-    x_test_padding_masks = np.ones(x_test_images.shape, dtype=np.float32)
+    x_train_padding_masks = np.ones(x_train_images_preprocessed.shape, dtype=np.float32)
+    x_test_padding_masks = np.ones(x_test_images_preprocessed.shape, dtype=np.float32)
 
-    x_train_images = pad_images_array(x_train_images)
-    x_test_images = pad_images_array(x_test_images)
+    x_train_images_preprocessed = pad_images_array(x_train_images_preprocessed)
+    x_test_images_preprocessed = pad_images_array(x_test_images_preprocessed)
 
     x_train_padding_masks = pad_images_array(x_train_padding_masks)
     x_test_padding_masks = pad_images_array(x_test_padding_masks)
 
-    x_train_images = tf.convert_to_tensor(x_train_images)
-    x_test_images = tf.convert_to_tensor(x_test_images)
+    x_train_images_preprocessed = tf.convert_to_tensor(x_train_images_preprocessed)
+    x_test_images_preprocessed = tf.convert_to_tensor(x_test_images_preprocessed)
 
     x_train_padding_masks = x_train_padding_masks.astype(bool)
     x_test_padding_masks = x_test_padding_masks.astype(bool)
@@ -498,46 +528,54 @@ def preprocess_images_array(x_train_images, x_test_images):
     x_train_padding_masks = tf.convert_to_tensor(x_train_padding_masks)
     x_test_padding_masks = tf.convert_to_tensor(x_test_padding_masks)
 
-    return (x_train_images, x_train_original_shapes, x_train_padding_masks, x_test_images, x_test_original_shapes,
-            x_test_padding_masks, standard_scaler)
+    return (x_train_images_preprocessed, x_train_original_shapes, x_train_padding_masks, x_test_images_preprocessed,
+            x_test_original_shapes, x_test_padding_masks, standard_scaler)
 
 
 def preprocess_labels(x_train_labels, x_test_labels):
     print("preprocess_labels")
 
-    x_train_labels = tf.convert_to_tensor(x_train_labels)
-    x_test_labels = tf.convert_to_tensor(x_test_labels)
+    x_train_labels_preprocessed = tf.convert_to_tensor(x_train_labels)
+    x_test_labels_preprocessed = tf.convert_to_tensor(x_test_labels)
 
-    return x_train_labels, x_test_labels
+    return x_train_labels_preprocessed, x_test_labels_preprocessed
 
 
 def preprocess_input(x_train_images, x_test_images, x_train_labels, x_test_labels):
     print("preprocess_input")
 
+    x_train_images_preprocessed = copy.deepcopy(x_train_images)
+    x_test_images_preprocessed = copy.deepcopy(x_test_images)
+
     if greyscale_bool:
-        x_train_images = convert_rgb_to_greyscale(x_train_images)
-        x_test_images = convert_rgb_to_greyscale(x_test_images)
+        x_train_images_preprocessed = convert_rgb_to_greyscale(x_train_images_preprocessed)
+        x_test_images_preprocessed = convert_rgb_to_greyscale(x_test_images_preprocessed)
 
     if read_data_from_storage_bool or preprocess_list_bool:
-        (x_train_images, x_train_original_shapes, x_train_padding_masks, x_test_images, x_test_original_shapes,
-         x_test_padding_masks, standard_scaler) = preprocess_images_list(x_train_images, x_test_images)
+        (x_train_images_preprocessed, x_train_original_shapes, x_train_padding_masks, x_test_images_preprocessed,
+         x_test_original_shapes, x_test_padding_masks, standard_scaler) = (
+            preprocess_images_list(x_train_images_preprocessed, x_test_images_preprocessed))
     else:
-        (x_train_images, x_train_original_shapes, x_train_padding_masks, x_test_images, x_test_original_shapes,
-         x_test_padding_masks, standard_scaler) = preprocess_images_array(x_train_images, x_test_images)
+        (x_train_images_preprocessed, x_train_original_shapes, x_train_padding_masks, x_test_images_preprocessed,
+         x_test_original_shapes, x_test_padding_masks, standard_scaler) = (
+            preprocess_images_array(x_train_images_preprocessed, x_test_images_preprocessed))
 
-    x_train_labels, x_test_labels = preprocess_labels(x_train_labels, x_test_labels)
+    x_train_labels_preprocessed, x_test_labels_preprocessed = preprocess_labels(x_train_labels, x_test_labels)
 
-    return (x_train_images, x_train_original_shapes, x_train_padding_masks, x_test_images, x_test_original_shapes,
-            x_test_padding_masks, standard_scaler, x_train_labels, x_test_labels)
+    return (x_train_images_preprocessed, x_train_original_shapes, x_train_padding_masks, x_test_images_preprocessed,
+            x_test_original_shapes, x_test_padding_masks, standard_scaler, x_train_labels_preprocessed,
+            x_test_labels_preprocessed)
 
 
-def get_previous_geometric_value(an, a0):
-    n = np.log2(an / a0) + 1
+def get_previous_geometric_value(value, base):
+    power = np.log2(value / base) + 1
 
-    if not n.is_integer():
-        an = a0 * np.power(2.0, (np.floor(n) - 1.0))
+    if not power.is_integer():
+        previous_value = base * np.power(2.0, (np.floor(power) - 1.0))
+    else:
+        previous_value = value
 
-    return an
+    return previous_value
 
 
 def get_model_dense(x_train_images):
@@ -2536,15 +2574,17 @@ def get_batch_sizes(x_train_images):
 
 
 def flip_image(image):
+    flipped_image = copy.deepcopy(image)
+
     if axis_zero_flip_bool:
         if random.choice([True, False]):
-            image = np.flip(image, axis=0)
+            flipped_image = np.flip(flipped_image, axis=0)
 
     if axis_one_flip_bool:
         if random.choice([True, False]):
-            image = np.flip(image, axis=1)
+            flipped_image = np.flip(flipped_image, axis=1)
 
-    return image
+    return flipped_image
 
 
 def translate_image(image):
@@ -2553,84 +2593,84 @@ def translate_image(image):
     translation = random.randint(0, max_translation)
 
     if random.choice([True, False]):
-        image = np.pad(image, ((0, translation), (0, 0), (0, 0)))  # noqa
+        translated_image = np.pad(image, ((0, translation), (0, 0), (0, 0)))  # noqa
     else:
-        image = np.pad(image, ((translation, 0), (0, 0), (0, 0)))  # noqa
+        translated_image = np.pad(image, ((translation, 0), (0, 0), (0, 0)))  # noqa
 
     translation = random.randint(0, max_translation)
 
     if random.choice([True, False]):
-        image = np.pad(image, ((0, 0), (0, translation), (0, 0)))  # noqa
+        translated_image = np.pad(translated_image, ((0, 0), (0, translation), (0, 0)))  # noqa
     else:
-        image = np.pad(image, ((0, 0), (translation, 0), (0, 0)))  # noqa
+        translated_image = np.pad(translated_image, ((0, 0), (translation, 0), (0, 0)))  # noqa
 
-    return image
+    return translated_image
 
 
 def crop_image(image, output_dimension_size):
-    while image.shape[0] - 1 > output_dimension_size:
-        image = image[1:-1]
+    cropped_image = copy.deepcopy(image)
 
-    if image.shape[0] > output_dimension_size:
-        image = image[1:]
+    while cropped_image.shape[0] - 1 > output_dimension_size:
+        cropped_image = cropped_image[1:-1]
 
-    while image.shape[1] - 1 > output_dimension_size:
-        image = image[:, 1:-1]
+    if cropped_image.shape[0] > output_dimension_size:
+        cropped_image = cropped_image[1:]
 
-    if image.shape[1] > output_dimension_size:
-        image = image[:, 1:]
+    while cropped_image.shape[1] - 1 > output_dimension_size:
+        cropped_image = cropped_image[:, 1:-1]
 
-    return image
+    if cropped_image.shape[1] > output_dimension_size:
+        cropped_image = cropped_image[:, 1:]
+
+    return cropped_image
 
 
 def augmentation(image):
-    image = image.numpy()
+    augmented_image = image.numpy()
 
-    input_dimension_size = image.shape[0]
+    input_dimension_size = augmented_image.shape[0]
 
-    image = flip_image(image)
+    augmented_image = flip_image(augmented_image)
 
     if gaussian_bool:
-        image = gaussian(image, sigma=random.uniform(0.0, max_sigma), mode="constant", preserve_range=True,
-                         channel_axis=-1)
+        augmented_image = gaussian(augmented_image, sigma=random.uniform(0.0, max_sigma), mode="constant",
+                                   preserve_range=True, channel_axis=-1)
 
     if sharpen_bool:
-        image = unsharp_mask(image, radius=random.uniform(0.0, max_radius), amount=random.uniform(0.0, max_amount),
-                             preserve_range=True, channel_axis=1)
+        augmented_image = unsharp_mask(augmented_image, radius=random.uniform(0.0, max_radius),
+                                       amount=random.uniform(0.0, max_amount), preserve_range=True, channel_axis=1)
 
     if scale_bool:
-        image = rescale(image, random.uniform(min_scale, max_scale), order=3, preserve_range=True, channel_axis=-1)
+        augmented_image = rescale(augmented_image, random.uniform(min_scale, max_scale), order=3, preserve_range=True,
+                                  channel_axis=-1)
 
     if rotate_bool:
-        image = scipy.ndimage.rotate(image, angle=random.uniform(min_angle, max_angle), axes=(0, 1), order=1)
+        augmented_image = scipy.ndimage.rotate(augmented_image, angle=random.uniform(min_angle, max_angle), axes=(0, 1),
+                                               order=1)
 
     if translate_bool:
-        image = translate_image(image)
+        augmented_image = translate_image(augmented_image)
 
-    image = pad_image(image, input_dimension_size)
-    image = crop_image(image, input_dimension_size)
+    augmented_image = pad_image(augmented_image, input_dimension_size)
+    augmented_image = crop_image(augmented_image, input_dimension_size)
 
-    image = tf.convert_to_tensor(image)
+    augmented_image = tf.convert_to_tensor(augmented_image)
 
-    return image
+    return augmented_image
 
 
 def mean_squared_error(y_true, y_pred, mask):
     y_true = tf.boolean_mask(y_true, mask)
     y_pred = tf.boolean_mask(y_pred, mask)
 
-    loss = tf.math.reduce_mean(tf.math.pow(y_true - y_pred, 2.0))
-
-    return loss
+    return tf.math.reduce_mean(tf.math.pow(y_true - y_pred, 2.0))
 
 
 def root_mean_squared_error(y_true, y_pred, mask):
     y_true = tf.boolean_mask(y_true, mask)
     y_pred = tf.boolean_mask(y_pred, mask)
 
-    loss = tf.math.sqrt(tf.math.reduce_mean(tf.math.pow(y_true - y_pred, 2.0)) + tf.keras.backend.epsilon())
-
-    return loss
+    return tf.math.sqrt(tf.math.reduce_mean(tf.math.pow(y_true - y_pred, 2.0)) + tf.keras.backend.epsilon())
 
 
 def gaussian_negative_log_likelihood(y_true, y_pred_mean, y_pred_std, mask):
@@ -2642,50 +2682,44 @@ def gaussian_negative_log_likelihood(y_true, y_pred_mean, y_pred_std, mask):
     y_pred_mean = tf.reshape(y_pred_mean, (y_pred_mean.shape[0], -1))
     y_pred_std = tf.reshape(y_pred_std, (y_pred_std.shape[0], -1))
 
-    loss = (
-        -tf.math.reduce_mean((-(tf.math.pow((tf.math.divide_no_nan((y_true - y_pred_mean), y_pred_std)), 2.0) / 2.0)
-                              - (tf.math.log(y_pred_std + tf.keras.backend.epsilon())) -  # noqa
-                              (tf.math.log(2.0 * np.pi) / 2.0))))  # noqa
-
-    return loss
+    return -tf.math.reduce_mean((-(tf.math.pow((tf.math.divide_no_nan((y_true - y_pred_mean),
+                                                                      y_pred_std)), 2.0) / 2.0) -
+                                 (tf.math.log(y_pred_std + tf.keras.backend.epsilon())) -
+                                 (tf.math.log(2.0 * np.pi) / 2.0)))
 
 
 def gaussian_kullback_leibler_divergence(y_pred_mean, y_pred_std):
     y_pred_mean = tf.reshape(y_pred_mean, (y_pred_mean.shape[0], -1))
     y_pred_std = tf.reshape(y_pred_std, (y_pred_std.shape[0], -1))
 
-    loss = tf.math.reduce_mean((tf.math.log(tf.math.divide_no_nan(1.0, y_pred_std) + tf.keras.backend.epsilon()) +  # noqa
+    return tf.math.reduce_mean((tf.math.log(tf.math.divide_no_nan(1.0, y_pred_std) + tf.keras.backend.epsilon()) +
                                 ((tf.math.pow(y_pred_std, 2.0) + tf.math.pow(y_pred_mean, 2.0)) / 2.0)) -
                                (1.0 / 2.0))
-
-    return loss
 
 
 def get_error(y_true, y_pred, mask):
     y_true = tf.boolean_mask(y_true, mask)
     y_pred = tf.boolean_mask(y_pred, mask)
 
-    error = tf.math.reduce_mean(tf.math.abs(tf.math.log(tf.math.abs(tf.math.divide_no_nan(y_pred, y_true)) +
-                                                        tf.keras.backend.epsilon()))) * 100.0
-
-    return error
+    return tf.math.reduce_mean(tf.math.abs(tf.math.log(tf.math.abs(tf.math.divide_no_nan(y_pred, y_true)) +
+                                                       tf.keras.backend.epsilon()))) * 100.0
 
 
 def output_image(image, original_shape, padding_mask, standard_scaler, current_output_path):
-    image = image.numpy()
-    padding_mask = padding_mask.numpy()
+    outputted_image = image.numpy()
 
-    image = image[padding_mask]
-    image = np.reshape(image, original_shape)
+    outputted_image = outputted_image[padding_mask.numpy()]
+    outputted_image = np.reshape(outputted_image, original_shape)
 
-    image = np.reshape(standard_scaler.inverse_transform(np.reshape(image, (-1, 1))), image.shape)
-    image = np.clip(image, 0.0, 255.0).astype(np.uint8)
+    outputted_image = np.reshape(standard_scaler.inverse_transform(np.reshape(outputted_image, (-1, 1))),
+                                 outputted_image.shape)
+    outputted_image = np.clip(outputted_image, 0.0, 255.0).astype(np.uint8)
 
     if greyscale_bool:
-        image = image[:, :, 0]
+        outputted_image = outputted_image[:, :, 0]
 
-    image = Image.fromarray(image)
-    image.save(current_output_path)
+    outputted_image = Image.fromarray(outputted_image)
+    outputted_image.save(current_output_path)
 
     return True
 
