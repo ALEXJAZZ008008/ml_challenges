@@ -40,8 +40,8 @@ max_output_dimension_size = 256
 deep_bool = True
 conv_bool = True
 alex_bool = True
-gaussian_latent_bool = True
-discrete_bool = False
+gaussian_latent_bool = False
+discrete_bool = True
 gaussian_negative_log_likelihood_bool = False
 dense_layers = 4
 conditional_dense_layers = 2
@@ -94,8 +94,14 @@ translate_bool = False
 translate_proportion = 0.25
 
 if alex_bool:
-    mean_squared_error_epoch = 1
+    if discrete_bool:
+        discrete_mean_squared_error_epoch = 1
+        mean_squared_error_epoch = 2
+    else:
+        discrete_mean_squared_error_epoch = 0
+        mean_squared_error_epoch = 1
 else:
+    discrete_mean_squared_error_epoch = 0
     mean_squared_error_epoch = epochs
 
 gaussian_latent_loss_weight = 0.0
@@ -663,7 +669,7 @@ def get_model_conv(x_train_images):
             x = tf.keras.layers.Lambda(tf.keras.activations.relu)(x)
 
     x = tf.keras.layers.Conv2D(filters=input_shape[-1],
-                               kernel_size=(1, 1),
+                               kernel_size=(3, 3),
                                strides=(1, 1),
                                padding="same")(x)
 
@@ -737,7 +743,7 @@ def get_model_conv_alex(x_train_images, x_train_labels):
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+        x = tf.keras.layers.Conv2D(filters=filters[i],
                                    kernel_size=(3, 3),
                                    strides=(1, 1),
                                    padding="same",
@@ -868,7 +874,7 @@ def get_model_conv_alex(x_train_images, x_train_labels):
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
                                                                 "c2": 2,
                                                                 "c3": 2})(x)
-        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+        x = tf.keras.layers.Conv2D(filters=filters[i],
                                    kernel_size=(3, 3),
                                    strides=(1, 1),
                                    padding="same",
@@ -987,7 +993,7 @@ def get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels):
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+        x = tf.keras.layers.Conv2D(filters=filters[i],
                                    kernel_size=(3, 3),
                                    strides=(1, 1),
                                    padding="same",
@@ -1168,7 +1174,7 @@ def get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels):
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
                                                                 "c2": 2,
                                                                 "c3": 2})(x)
-        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+        x = tf.keras.layers.Conv2D(filters=filters[i],
                                    kernel_size=(3, 3),
                                    strides=(1, 1),
                                    padding="same",
@@ -1282,7 +1288,7 @@ def get_model_conv_alex_discrete(x_train_images, x_train_labels):
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+        x = tf.keras.layers.Conv2D(filters=filters[i],
                                    kernel_size=(3, 3),
                                    strides=(1, 1),
                                    padding="same",
@@ -1420,7 +1426,7 @@ def get_model_conv_alex_discrete(x_train_images, x_train_labels):
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
                                                                 "c2": 2,
                                                                 "c3": 2})(x)
-        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+        x = tf.keras.layers.Conv2D(filters=filters[i],
                                    kernel_size=(3, 3),
                                    strides=(1, 1),
                                    padding="same",
@@ -1534,7 +1540,7 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+        x = tf.keras.layers.Conv2D(filters=filters[i],
                                    kernel_size=(3, 3),
                                    strides=(1, 1),
                                    padding="same",
@@ -1665,7 +1671,7 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
                                                                 "c2": 2,
                                                                 "c3": 2})(x)
-        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+        x = tf.keras.layers.Conv2D(filters=filters[i],
                                    kernel_size=(3, 3),
                                    strides=(1, 1),
                                    padding="same",
@@ -1858,7 +1864,7 @@ def get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+        x = tf.keras.layers.Conv2D(filters=filters[i],
                                    kernel_size=(3, 3),
                                    strides=(1, 1),
                                    padding="same",
@@ -2039,7 +2045,7 @@ def get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
                                                                 "c2": 2,
                                                                 "c3": 2})(x)
-        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+        x = tf.keras.layers.Conv2D(filters=filters[i],
                                    kernel_size=(3, 3),
                                    strides=(1, 1),
                                    padding="same",
@@ -2227,7 +2233,7 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+        x = tf.keras.layers.Conv2D(filters=filters[i],
                                    kernel_size=(3, 3),
                                    strides=(1, 1),
                                    padding="same",
@@ -2365,7 +2371,7 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
                                                                 "c2": 2,
                                                                 "c3": 2})(x)
-        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+        x = tf.keras.layers.Conv2D(filters=filters[i],
                                    kernel_size=(3, 3),
                                    strides=(1, 1),
                                    padding="same",
@@ -2811,7 +2817,7 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
                                 standard_scaler, x_train_labels, x_test_labels):
     print("train")
 
-    validate(model, x_test_images, x_test_original_shapes, x_test_padding_masks, standard_scaler, x_test_labels,0)
+    validate(model, x_test_images, x_test_original_shapes, x_test_padding_masks, standard_scaler, x_test_labels, 0)
 
     x_train_images_len = len(x_train_images)
 
@@ -2890,16 +2896,27 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
                                         tf.math.reduce_sum(model.losses)])
                         else:
                             if discrete_bool:
-                                if i + 1 > mean_squared_error_epoch:
-                                    with tf.GradientTape() as tape:
-                                        y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
-                                            model([current_x_train_image, current_x_train_label], training=True))
+                                if i + 1 > discrete_mean_squared_error_epoch:
+                                    if i + 1 > mean_squared_error_epoch:
+                                        with tf.GradientTape() as tape:
+                                            y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
+                                                model([current_x_train_image, current_x_train_label], training=True))
 
-                                        loss = tf.math.reduce_sum([
-                                            gaussian_negative_log_likelihood(current_x_train_image, y_pred_mean,
-                                                                             y_pred_stddev,
-                                                                             current_x_train_padding_mask),
-                                            tf.math.reduce_sum(model.losses)])
+                                            loss = tf.math.reduce_sum([
+                                                gaussian_negative_log_likelihood(current_x_train_image, y_pred_mean,
+                                                                                 y_pred_stddev,
+                                                                                 current_x_train_padding_mask),
+                                                tf.math.reduce_sum(model.losses)])
+                                    else:
+                                        with tf.GradientTape() as tape:
+                                            y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
+                                                model([current_x_train_image, current_x_train_label], training=True))
+
+                                            y_pred = tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev)
+
+                                            loss = tf.math.reduce_sum([mean_squared_error(current_x_train_image, y_pred,
+                                                                                          current_x_train_padding_mask),
+                                                                       tf.math.reduce_sum(model.losses)])
                                 else:
                                     with tf.GradientTape() as tape:
                                         y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
@@ -2907,7 +2924,7 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
 
                                         y_pred = tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev)
 
-                                        loss = tf.math.reduce_sum([mean_squared_error(current_x_train_image, y_pred,
+                                        loss = tf.math.reduce_sum([mean_squared_error(y_pred, y_pred,
                                                                                       current_x_train_padding_mask),
                                                                    tf.math.reduce_sum(model.losses)])
                             else:
@@ -2971,21 +2988,30 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
                                         tf.math.reduce_sum(model.losses)])
                         else:
                             if discrete_bool:
-                                if i + 1 > mean_squared_error_epoch:
-                                    with tf.GradientTape() as tape:
-                                        y_pred, x_latent_quantised, x_latent_discretised = (
-                                            model([current_x_train_image, current_x_train_label], training=True))
+                                if i + 1 > discrete_mean_squared_error_epoch:
+                                    if i + 1 > mean_squared_error_epoch:
+                                        with tf.GradientTape() as tape:
+                                            y_pred, x_latent_quantised, x_latent_discretised = (
+                                                model([current_x_train_image, current_x_train_label], training=True))
 
-                                        loss = tf.math.reduce_sum([
-                                            root_mean_squared_error(current_x_train_image, y_pred,
-                                                                    current_x_train_padding_mask),
-                                            tf.math.reduce_sum(model.losses)])
+                                            loss = tf.math.reduce_sum([
+                                                root_mean_squared_error(current_x_train_image, y_pred,
+                                                                        current_x_train_padding_mask),
+                                                tf.math.reduce_sum(model.losses)])
+                                    else:
+                                        with tf.GradientTape() as tape:
+                                            y_pred, x_latent_quantised, x_latent_discretised = (
+                                                model([current_x_train_image, current_x_train_label], training=True))
+
+                                            loss = tf.math.reduce_sum([mean_squared_error(current_x_train_image, y_pred,
+                                                                                          current_x_train_padding_mask),
+                                                                       tf.math.reduce_sum(model.losses)])
                                 else:
                                     with tf.GradientTape() as tape:
                                         y_pred, x_latent_quantised, x_latent_discretised = (
                                             model([current_x_train_image, current_x_train_label], training=True))
 
-                                        loss = tf.math.reduce_sum([mean_squared_error(current_x_train_image, y_pred,
+                                        loss = tf.math.reduce_sum([mean_squared_error(y_pred, y_pred,
                                                                                       current_x_train_padding_mask),
                                                                    tf.math.reduce_sum(model.losses)])
                             else:
@@ -3138,20 +3164,32 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_t
 
                                 loss = tf.math.reduce_mean([
                                     mean_squared_error(current_x_train_images, y_pred, current_x_train_padding_masks),
-                                        gaussian_latent_loss_weight *
-                                        gaussian_kullback_leibler_divergence(y_latent_mean, y_latent_stddev),
+                                    gaussian_latent_loss_weight * gaussian_kullback_leibler_divergence(y_latent_mean,
+                                                                                                       y_latent_stddev),
                                     tf.math.reduce_sum(model.losses)])
                     else:
                         if discrete_bool:
-                            if i + 1 > mean_squared_error_epoch:
-                                with tf.GradientTape() as tape:
-                                    y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
-                                        model([current_x_train_images, current_x_train_labels], training=True))
+                            if i + 1 > discrete_mean_squared_error_epoch:
+                                if i + 1 > mean_squared_error_epoch:
+                                    with tf.GradientTape() as tape:
+                                        y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
+                                            model([current_x_train_images, current_x_train_labels], training=True))
 
-                                    loss = tf.math.reduce_sum([
-                                        gaussian_negative_log_likelihood(current_x_train_images, y_pred_mean,
-                                                                         y_pred_stddev, current_x_train_padding_masks),
-                                        tf.math.reduce_sum(model.losses)])
+                                        loss = tf.math.reduce_sum([
+                                            gaussian_negative_log_likelihood(current_x_train_images, y_pred_mean,
+                                                                             y_pred_stddev,
+                                                                             current_x_train_padding_masks),
+                                            tf.math.reduce_sum(model.losses)])
+                                else:
+                                    with tf.GradientTape() as tape:
+                                        y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
+                                            model([current_x_train_images, current_x_train_labels], training=True))
+
+                                        y_pred = tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev)
+
+                                        loss = tf.math.reduce_sum([mean_squared_error(current_x_train_images, y_pred,
+                                                                                      current_x_train_padding_masks),
+                                                                   tf.math.reduce_sum(model.losses)])
                             else:
                                 with tf.GradientTape() as tape:
                                     y_pred_mean, y_pred_stddev, x_latent_quantised, x_latent_discretised = (
@@ -3159,7 +3197,7 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_t
 
                                     y_pred = tf.random.normal(y_pred_mean.shape, y_pred_mean, y_pred_stddev)
 
-                                    loss = tf.math.reduce_sum([mean_squared_error(current_x_train_images, y_pred,
+                                    loss = tf.math.reduce_sum([mean_squared_error(y_pred, y_pred,
                                                                                   current_x_train_padding_masks),
                                                                tf.math.reduce_sum(model.losses)])
                         else:
@@ -3218,25 +3256,35 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_t
 
                                 loss = tf.math.reduce_mean([
                                     mean_squared_error(current_x_train_images, y_pred, current_x_train_padding_masks),
-                                        gaussian_latent_loss_weight *
-                                        gaussian_kullback_leibler_divergence(y_latent_mean, y_latent_stddev),
+                                    gaussian_latent_loss_weight * gaussian_kullback_leibler_divergence(y_latent_mean,
+                                                                                                       y_latent_stddev),
                                     tf.math.reduce_sum(model.losses)])
                     else:
                         if discrete_bool:
-                            if i + 1 > mean_squared_error_epoch:
-                                with tf.GradientTape() as tape:
-                                    y_pred, x_latent_quantised, x_latent_discretised = (
-                                        model([current_x_train_images, current_x_train_labels], training=True))
+                            if i + 1 > discrete_mean_squared_error_epoch:
+                                if i + 1 > mean_squared_error_epoch:
+                                    with tf.GradientTape() as tape:
+                                        y_pred, x_latent_quantised, x_latent_discretised = (
+                                            model([current_x_train_images, current_x_train_labels], training=True))
 
-                                    loss = tf.math.reduce_sum([root_mean_squared_error(current_x_train_images, y_pred,
-                                                                                       current_x_train_padding_masks),
-                                                               tf.math.reduce_sum(model.losses)])
+                                        loss = tf.math.reduce_sum([
+                                            root_mean_squared_error(current_x_train_images, y_pred,
+                                                                    current_x_train_padding_masks),
+                                            tf.math.reduce_sum(model.losses)])
+                                else:
+                                    with tf.GradientTape() as tape:
+                                        y_pred, x_latent_quantised, x_latent_discretised = (
+                                            model([current_x_train_images, current_x_train_labels], training=True))
+
+                                        loss = tf.math.reduce_sum([mean_squared_error(current_x_train_images, y_pred,
+                                                                                      current_x_train_padding_masks),
+                                                                   tf.math.reduce_sum(model.losses)])
                             else:
                                 with tf.GradientTape() as tape:
                                     y_pred, x_latent_quantised, x_latent_discretised = (
                                         model([current_x_train_images, current_x_train_labels], training=True))
 
-                                    loss = tf.math.reduce_sum([mean_squared_error(current_x_train_images, y_pred,
+                                    loss = tf.math.reduce_sum([mean_squared_error(y_pred, y_pred,
                                                                                   current_x_train_padding_masks),
                                                                tf.math.reduce_sum(model.losses)])
                         else:
