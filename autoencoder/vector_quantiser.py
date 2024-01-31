@@ -7,6 +7,9 @@ import einops
 import tensorflow as tf
 
 
+commitment_loss_weight = 0.25
+
+
 # https://keras.io/examples/generative/vq_vae/
 class VectorQuantiser(tf.keras.layers.Layer):
     def __init__(self, embedding_dim, num_embeddings, **kwargs):
@@ -22,7 +25,7 @@ class VectorQuantiser(tf.keras.layers.Layer):
         self.stddev = tf.Variable(initial_value=initialiser(shape=(1,)), trainable=True)
 
         # Initialize the embeddings which we will quantize.
-        initialiser = tf.keras.initializers.RandomNormal(stddev=1.0)
+        initialiser = tf.keras.initializers.RandomUniform(minval=-3.0, maxval=3.0)
         self.embeddings = tf.Variable(initial_value=initialiser(shape=(self.embedding_dim, self.num_embeddings)),
                                       trainable=True)
 
@@ -59,8 +62,10 @@ class VectorQuantiser(tf.keras.layers.Layer):
         # https://keras.io/guides/making_new_layers_and_models_via_subclassing/.
         # Check the original paper to get a handle on the formulation of the loss function.
         self.add_loss(tf.math.reduce_mean(tf.math.pow(tf.stop_gradient(standardised) - quantised, 2.0)))
+        self.add_loss(commitment_loss_weight *
+                      tf.math.reduce_mean(tf.math.pow(standardised - tf.stop_gradient(quantised), 2.0)))
 
-        quantised = einops.rearrange(quantised, "b c (h w) -> b h w c", w=x.shape[2])
+        quantised = einops.rearrange(quantised, "b c (h w) -> b h w c", h=x.shape[1], w=x.shape[2])
         discretised = tf.reshape(discretised, [-1, quantised.shape[-1]])
 
         quantised = (quantised + tf.stop_gradient(self.mean)) * tf.stop_gradient(self.stddev)

@@ -49,12 +49,12 @@ filters = [64, 128, 256, 512, 1024]
 conv_layers = [2, 2, 2, 2, 2]
 num_heads = 4
 key_dim = 32
-num_embeddings = 64
+num_embeddings = 65536
 
 if alex_bool:
     learning_rate = 1e-04
     weight_decay = 0.0
-    use_ema = True
+    use_ema = False
     ema_overwrite_frequency = None
 else:
     learning_rate = 1e-04
@@ -95,8 +95,8 @@ translate_proportion = 0.25
 
 if alex_bool:
     if discrete_bool:
-        discrete_mean_squared_error_epoch = 1
-        mean_squared_error_epoch = 2
+        discrete_mean_squared_error_epoch = 0
+        mean_squared_error_epoch = 1
     else:
         discrete_mean_squared_error_epoch = 0
         mean_squared_error_epoch = 1
@@ -355,11 +355,11 @@ def pad_images_list(images, current_output_path):
         padded_images.append(set_data_from_storage(image, images[i]))
 
         if read_data_from_storage_bool:
-            images_split = images[i].strip().split('.')
-            padding_masks.append("{0}/{1}_padding_mask.{2}".format(current_output_path, images_split[2],
-                                                                   images_split[3]))
+            images_split = images[i].strip().split('/')[-1].split('.')
+            padding_masks.append("{0}/{1}_padding_mask.{2}".format(current_output_path, images_split[0],
+                                                                   images_split[1]))
 
-        padding_masks.append(set_data_from_storage(padding_mask, padding_masks[i]))
+        padding_masks[i] = set_data_from_storage(padding_mask, padding_masks[i])
 
     return padded_images, original_shapes, padding_masks
 
@@ -404,7 +404,14 @@ def preprocess_images_list(x_train_images, x_test_images):
         normalise_images_list(x_train_images_preprocessed, x_test_images_preprocessed))
 
     x_train_padding_masks_output_path = "{0}/x_train_padding_masks/".format(output_path)
-    x_test_padding_masks_output_path = "{0}/x_train_padding_masks/".format(output_path)
+
+    if read_data_from_storage_bool:
+        mkdir_p(x_train_padding_masks_output_path)
+
+    x_test_padding_masks_output_path = "{0}/x_test_padding_masks/".format(output_path)
+
+    if read_data_from_storage_bool:
+        mkdir_p(x_test_padding_masks_output_path)
 
     x_train_images_preprocessed, x_train_original_shapes, x_train_padding_masks = (
         pad_images_list(x_train_images_preprocessed, x_train_padding_masks_output_path))
@@ -1421,9 +1428,8 @@ def get_model_conv_alex_discrete(x_train_images, x_train_labels):
         x = tf.keras.layers.Add()([x, x_res])
 
     x_shape_prod = tf.math.reduce_prod(x.shape[1:-1]).numpy()
-    x_latent_quantised, x_latent_discretised = (
-        VectorQuantiser(embedding_dim=x_shape_prod,  # noqa
-                        num_embeddings=num_embeddings)(x))
+    x_latent_quantised, x_latent_discretised = VectorQuantiser(embedding_dim=x_shape_prod,  # noqa
+                                                               num_embeddings=num_embeddings)(x)
 
     x = x_latent_quantised
 
@@ -2366,9 +2372,8 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
         x = tf.keras.layers.Add()([x, x_res])
 
     x_shape_prod = tf.math.reduce_prod(x.shape[1:-1]).numpy()
-    x_latent_quantised, x_latent_discretised = (
-        VectorQuantiser(embedding_dim=x_shape_prod,  # noqa
-                        num_embeddings=num_embeddings)(x))
+    x_latent_quantised, x_latent_discretised = VectorQuantiser(embedding_dim=x_shape_prod,  # noqa
+                                                               num_embeddings=num_embeddings)(x)
 
     x = x_latent_quantised
 
@@ -3106,7 +3111,7 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
             else:
                 loss_name = "MSE"
 
-            print("Epoch: {0:3}/{1:3} Batch size: {2:6} Iteration: {3:6}/{4:6} Loss ({5}): {6:14} Error: {7:14} +/- {8:14}%".format(
+            print("Epoch: {0:3}/{1:3} Batch size: {2:6} Iteration: {3:6}/{4:6} Loss ({5}): {6:18} Error: {7:18} +/- {8:18}%".format(
                 str(i + 1), str(epochs), str(current_batch_size), str(j + 1), str(iterations), loss_name,
                 str(loss.numpy()), str(error.numpy()), str(error_range.numpy())))
 
@@ -3366,7 +3371,7 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_t
             else:
                 loss_name = "MSE"
 
-            print("Epoch: {0:3}/{1:3} Batch size: {2:6} Iteration: {3:6}/{4:6} Loss ({5}): {6:14} Error: {7:14} +/- {8:14}%".format(
+            print("Epoch: {0:3}/{1:3} Batch size: {2:6} Iteration: {3:6}/{4:6} Loss ({5}): {6:18} Error: {7:18} +/- {8:18}%".format(
                 str(i + 1), str(epochs), str(current_batch_size), str(j + 1), str(iterations), loss_name,
                 str(loss.numpy()), str(error.numpy()), str(error_range.numpy())))
 
