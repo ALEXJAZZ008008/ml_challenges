@@ -18,7 +18,6 @@ import einops
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import tensorflow_models as tfm
-from standardiser import Standardiser
 from vector_quantiser import VectorQuantiser
 import pickle
 from PIL import Image
@@ -34,22 +33,28 @@ read_data_from_storage_bool = True
 
 preprocess_list_bool = True
 greyscale_bool = True
-min_output_dimension_size = 256
+min_output_dimension_size = 32
 max_output_dimension_size = 256
 
 deep_bool = True
 conv_bool = True
 alex_bool = True
 gaussian_latent_bool = False
-discrete_bool = True
+discrete_bool = False
 gaussian_negative_log_likelihood_bool = False
 dense_layers = 4
 conditional_dense_layers = 2
-filters = [64, 128, 256, 512, 1024]
-conv_layers = [2, 2, 2, 2, 2]
+filters = [32, 64, 128, 256, 512, 1024]
+
+if discrete_bool:
+    latent_filters = 1024
+else:
+    latent_filters = 128
+
+conv_layers = [2, 2, 2, 2, 2, 2]
 num_heads = 4
 key_dim = 32
-num_embeddings = 65536
+num_embeddings = 64
 
 if alex_bool:
     learning_rate = 1e-04
@@ -223,7 +228,7 @@ def get_next_geometric_value(value, base):
     if not power.is_integer():
         next_value = base * np.power(2.0, (np.ceil(power) - 1.0))
     else:
-        next_value = value
+        next_value = copy.deepcopy(value)
 
     return next_value
 
@@ -303,14 +308,20 @@ def normalise_images_list(x_train_images, x_test_images):
     return normalised_x_train_images, normalised_x_test_images, standard_scaler
 
 
-def pad_image(image, output_dimension_size):
+def pad_image(image, output_dimension_size, output_shape=None):
     padded_image = copy.deepcopy(image)
+
+    if output_shape is not None:
+        output_dimension_size = output_shape[0]
 
     while padded_image.shape[0] + 1 < output_dimension_size:
         padded_image = np.pad(padded_image, ((1, 1), (0, 0), (0, 0)))  # noqa
 
     if padded_image.shape[0] < output_dimension_size:
         padded_image = np.pad(padded_image, ((0, 1), (0, 0), (0, 0)))  # noqa
+
+    if output_shape is not None:
+        output_dimension_size = output_shape[1]
 
     while padded_image.shape[1] + 1 < output_dimension_size:
         padded_image = np.pad(padded_image, ((0, 0), (1, 1), (0, 0)))  # noqa
@@ -520,8 +531,15 @@ def preprocess_images_array(x_train_images, x_test_images):
     x_train_images_preprocessed, x_test_images_preprocessed, standard_scaler = (
         normalise_images_array(x_train_images_preprocessed, x_test_images_preprocessed))
 
-    x_train_original_shapes = x_train_images_preprocessed.shape
-    x_test_original_shapes = x_test_images_preprocessed.shape
+    x_train_original_shapes = []
+
+    for i in range(x_train_images_preprocessed.shape[0]):
+        x_train_original_shapes.append(x_train_images_preprocessed.shape[1:])
+
+    x_test_original_shapes = []
+
+    for i in range(x_test_images_preprocessed.shape[0]):
+        x_test_original_shapes.append(x_test_images_preprocessed.shape[1:])
 
     x_train_padding_masks = np.ones(x_train_images_preprocessed.shape, dtype=np.float32)
     x_test_padding_masks = np.ones(x_test_images_preprocessed.shape, dtype=np.float32)
@@ -586,7 +604,7 @@ def get_previous_geometric_value(value, base):
     if not power.is_integer():
         previous_value = base * np.power(2.0, (np.floor(power) - 1.0))
     else:
-        previous_value = value
+        previous_value = copy.deepcopy(value)
 
     return previous_value
 
@@ -617,11 +635,14 @@ def get_model_dense(x_train_images):
     x = tf.keras.layers.Dense(units=units)(x)
     x = tf.keras.layers.Lambda(tf.keras.activations.relu)(x)
 
+    x_latent = tf.keras.layers.Dense(units=units)(x)
+    x = x_latent
+
     x = tf.keras.layers.Dense(units=x_flatten.shape[-1])(x)
     x = tf.keras.layers.Reshape(x_input.shape[1:])(x)
 
     model = tf.keras.Model(inputs=[x_input],
-                           outputs=[x])
+                           outputs=[x, x_latent])
 
     return model
 
@@ -651,7 +672,15 @@ def get_model_deep_dense(x_train_images):
         x = tf.keras.layers.Dense(units=get_previous_geometric_value(x.shape[-1] - 1, 2.0))(x)
         x = tf.keras.layers.Lambda(tf.keras.activations.relu)(x)
 
-    x = tf.keras.layers.Dense(units=get_previous_geometric_value(x.shape[-1] - 1, 2.0))(x)
+    units = get_previous_geometric_value(x.shape[-1] - 1, 2.0)
+
+    x = tf.keras.layers.Dense(units=units)(x)
+    x = tf.keras.layers.Lambda(tf.keras.activations.relu)(x)
+
+    x_latent = tf.keras.layers.Dense(units=units)(x)
+    x = x_latent
+
+    x = tf.keras.layers.Dense(units=units)(x)
     x = tf.keras.layers.Lambda(tf.keras.activations.relu)(x)
 
     for i in range(dense_layers - 2, -1, -1):
@@ -662,7 +691,7 @@ def get_model_deep_dense(x_train_images):
     x = tf.keras.layers.Reshape(x_input.shape[1:])(x)
 
     model = tf.keras.Model(inputs=[x_input],
-                           outputs=[x])
+                           outputs=[x, x_latent])
 
     return model
 
@@ -703,6 +732,19 @@ def get_model_conv(x_train_images):
                                    padding="same")(x)
         x = tf.keras.layers.Lambda(tf.keras.activations.relu)(x)
 
+    x_latent = tf.keras.layers.Conv2D(filters=latent_filters,
+                                      kernel_size=(1, 1),
+                                      strides=(1, 1),
+                                      padding="same")(x)
+    x = x_latent
+
+    for j in range(conv_layers[-1]):
+        x = tf.keras.layers.Conv2D(filters=filters[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same")(x)
+        x = tf.keras.layers.Lambda(tf.keras.activations.relu)(x)
+
     for i in range(filters_len - 2, -1, -1):
         x = tf.keras.layers.UpSampling2D()(x)
 
@@ -719,7 +761,7 @@ def get_model_conv(x_train_images):
                                padding="same")(x)
 
     model = tf.keras.Model(inputs=[x_input],
-                           outputs=[x])
+                           outputs=[x, x_latent])
 
     return model
 
@@ -743,15 +785,19 @@ def get_model_conv_alex(x_train_images, x_train_labels):
                                padding="same",
                                kernel_initializer=tf.keras.initializers.orthogonal)(x_image_input)
 
+    conditioning_inputs_size = int(np.round((filters[-1] * 2)))
+
     x_label = (tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
-                                         output_dim=filters[-1],
-                                         embeddings_initializer=tf.keras.initializers.RandomNormal(stddev=1.0))
+                                         output_dim=conditioning_inputs_size,
+                                         embeddings_initializer=tf.keras.initializers.orthogonal)
                (x_label_input))
     x_label = x_label[:, 0]
 
+    x_conditioning = x_label
+
     for i in range(conditional_dense_layers):
-        x_label = tf.keras.layers.Dense(units=filters[-1])(x_label)
-        x_label = tf.keras.layers.Lambda(tf.keras.activations.relu)(x_label)
+        x_conditioning = tf.keras.layers.Dense(units=conditioning_inputs_size)(x_conditioning)
+        x_conditioning = tf.keras.layers.Lambda(tf.keras.activations.relu)(x_conditioning)
 
     filters_len = len(filters)
 
@@ -764,21 +810,25 @@ def get_model_conv_alex(x_train_images, x_train_labels):
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+            x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning))
+            x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning_beta_gamma))
 
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+            x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-            x = tf.keras.layers.Multiply()([x, x_label_gamma])
-            x = tf.keras.layers.Add()([x, x_label_beta])
+            x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+            x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+            x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+            x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
         x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -788,14 +838,14 @@ def get_model_conv_alex(x_train_images, x_train_labels):
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-        x = tf.keras.layers.Conv2D(filters=filters[i],
-                                   kernel_size=(3, 3),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b (h1 h2) (w1 w2) c -> b h1 w1 (c h2 w2)",
                                                                 "h2": 2,
                                                                 "w2": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(1, 1),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
     x_res = x
 
@@ -805,21 +855,25 @@ def get_model_conv_alex(x_train_images, x_train_labels):
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+        x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning))
+        x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning_beta_gamma))
 
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+        x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-        x = tf.keras.layers.Multiply()([x, x_label_gamma])
-        x = tf.keras.layers.Add()([x, x_label_beta])
+        x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+        x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+        x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
     x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -832,7 +886,9 @@ def get_model_conv_alex(x_train_images, x_train_labels):
     if num_heads is not None and key_dim is not None:
         x_res = x
 
-        x = Standardiser()(x)  # noqa
+        x = tf.keras.layers.GroupNormalization(groups=1,
+                                               center=False,
+                                               scale=False)(x)  # noqa
 
         x_shape = x.shape
         x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
@@ -850,39 +906,13 @@ def get_model_conv_alex(x_train_images, x_train_labels):
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
         x = tf.keras.layers.Add()([x_res, x])
 
-        x_res = x
+    x_latent = tf.keras.layers.Conv2D(filters=latent_filters,
+                                      kernel_size=(1, 1),
+                                      strides=(1, 1),
+                                      padding="same",
+                                      kernel_initializer=tf.keras.initializers.orthogonal)(x)
+    x = x_latent
 
-        for j in range(conv_layers[-1]):
-            x = tf.keras.layers.Conv2D(filters=filters[-1],
-                                       kernel_size=(3, 3),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x)
-
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
-
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
-
-            x = tf.keras.layers.Multiply()([x, x_label_gamma])
-            x = tf.keras.layers.Add()([x, x_label_beta])
-            x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
-
-        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                       kernel_size=(1, 1),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
-        x = tf.keras.layers.Add()([x, x_res])
-
-    x_latent = x
     x_res = x
 
     for i in range(conv_layers[-1]):
@@ -891,21 +921,25 @@ def get_model_conv_alex(x_train_images, x_train_labels):
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+        x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning))
+        x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning_beta_gamma))
 
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+        x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-        x = tf.keras.layers.Multiply()([x, x_label_gamma])
-        x = tf.keras.layers.Add()([x, x_label_beta])
+        x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+        x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+        x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
     x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -916,14 +950,14 @@ def get_model_conv_alex(x_train_images, x_train_labels):
     x = tf.keras.layers.Add()([x, x_res])
 
     for i in range(filters_len - 2, -1, -1):
-        x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
-                                                                "c2": 2,
-                                                                "c3": 2})(x)
-        x = tf.keras.layers.Conv2D(filters=filters[i],
-                                   kernel_size=(3, 3),
+        x = tf.keras.layers.Conv2D(filters=int(np.round(filters[i] * 4.0)),
+                                   kernel_size=(1, 1),
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
+                                                                "c2": 2,
+                                                                "c3": 2})(x)
 
         x_res = x
 
@@ -933,21 +967,25 @@ def get_model_conv_alex(x_train_images, x_train_labels):
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+            x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning))
+            x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning_beta_gamma))
 
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+            x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-            x = tf.keras.layers.Multiply()([x, x_label_gamma])
-            x = tf.keras.layers.Add()([x, x_label_beta])
+            x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+            x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+            x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+            x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
         x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -983,7 +1021,7 @@ def get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels):
     x_label_input = tf.keras.Input(shape=x_train_labels.shape[1:])
 
     latent_x_y_size = int(np.round(image_input_shape[0] / np.power(2.0, len(filters) - 1.0)))
-    latent_shape = (latent_x_y_size, latent_x_y_size, filters[-1])
+    latent_shape = (latent_x_y_size, latent_x_y_size, latent_filters)
 
     x_latent_gaussian_input = tf.keras.Input(shape=latent_shape)
 
@@ -993,15 +1031,19 @@ def get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels):
                                padding="same",
                                kernel_initializer=tf.keras.initializers.orthogonal)(x_image_input)
 
+    conditioning_inputs_size = int(np.round((filters[-1] * 2)))
+
     x_label = (tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
-                                         output_dim=filters[-1],
-                                         embeddings_initializer=tf.keras.initializers.RandomNormal(stddev=1.0))
+                                         output_dim=conditioning_inputs_size,
+                                         embeddings_initializer=tf.keras.initializers.orthogonal)
                (x_label_input))
     x_label = x_label[:, 0]
 
+    x_conditioning = x_label
+
     for i in range(conditional_dense_layers):
-        x_label = tf.keras.layers.Dense(units=filters[-1])(x_label)
-        x_label = tf.keras.layers.Lambda(tf.keras.activations.relu)(x_label)
+        x_conditioning = tf.keras.layers.Dense(units=conditioning_inputs_size)(x_conditioning)
+        x_conditioning = tf.keras.layers.Lambda(tf.keras.activations.relu)(x_conditioning)
 
     filters_len = len(filters)
 
@@ -1014,21 +1056,25 @@ def get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels):
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+            x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning))
+            x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning_beta_gamma))
 
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+            x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-            x = tf.keras.layers.Multiply()([x, x_label_gamma])
-            x = tf.keras.layers.Add()([x, x_label_beta])
+            x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+            x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+            x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+            x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
         x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -1038,14 +1084,14 @@ def get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels):
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-        x = tf.keras.layers.Conv2D(filters=filters[i],
-                                   kernel_size=(3, 3),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b (h1 h2) (w1 w2) c -> b h1 w1 (c h2 w2)",
                                                                 "h2": 2,
                                                                 "w2": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(1, 1),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
     x_res = x
 
@@ -1055,21 +1101,25 @@ def get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels):
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+        x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning))
+        x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning_beta_gamma))
 
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+        x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-        x = tf.keras.layers.Multiply()([x, x_label_gamma])
-        x = tf.keras.layers.Add()([x, x_label_beta])
+        x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+        x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+        x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
     x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -1082,7 +1132,9 @@ def get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels):
     if num_heads is not None and key_dim is not None:
         x_res = x
 
-        x = Standardiser()(x)  # noqa
+        x = tf.keras.layers.GroupNormalization(groups=1,
+                                               center=False,
+                                               scale=False)(x)  # noqa
 
         x_shape = x.shape
         x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
@@ -1100,83 +1152,55 @@ def get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels):
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
         x = tf.keras.layers.Add()([x_res, x])
 
-    x_latent_mean = x
     x_res = x
 
+    x_latent_mean_stddev_filters = int(np.round(filters[-1] * 2.0))
+
     for i in range(conv_layers[-1]):
-        x_latent_mean = tf.keras.layers.Conv2D(filters=filters[-1],
-                                               kernel_size=(3, 3),
-                                               strides=(1, 1),
-                                               padding="same",
-                                               kernel_initializer=tf.keras.initializers.orthogonal)(x_latent_mean)
+        x = tf.keras.layers.Conv2D(filters=x_latent_mean_stddev_filters,
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_label_beta = tf.keras.layers.Dense(units=x_latent_mean.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x_latent_mean.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+        x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning))
+        x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning_beta_gamma))
 
-        x_label_gamma = tf.keras.layers.Dense(units=x_latent_mean.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x_latent_mean.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+        x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-        x_latent_mean = tf.keras.layers.Multiply()([x_latent_mean, x_label_gamma])
-        x_latent_mean = tf.keras.layers.Add()([x_latent_mean, x_label_beta])
-        x_latent_mean = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_latent_mean)
+        x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+        x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
 
-    x_res = tf.keras.layers.Conv2D(filters=x_latent_mean.shape[-1],
+        x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+        x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
+        x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
+
+    x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                    kernel_size=(1, 1),
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
-    x_latent_mean = tf.keras.layers.Add()([x_latent_mean, x_res])
+    x = tf.keras.layers.Add()([x, x_res])
 
-    x_latent_mean = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                           kernel_size=(3, 3),
-                                           strides=(1, 1),
-                                           padding="same",
-                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_latent_mean)
+    x_latent_mean_stddev_filters = int(np.round(latent_filters * 2.0))
 
-    x_latent_stddev = x
-    x_res = x
+    x = tf.keras.layers.Conv2D(filters=x_latent_mean_stddev_filters,
+                               kernel_size=(1, 1),
+                               strides=(1, 1),
+                               padding="same",
+                               kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
-    for i in range(conv_layers[-1]):
-        x_latent_stddev = tf.keras.layers.Conv2D(filters=filters[-1],
-                                                 kernel_size=(3, 3),
-                                                 strides=(1, 1),
-                                                 padding="same",
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_latent_stddev)
+    x_latent_mean = x[:, :, :, :latent_filters]
 
-        x_label_beta = tf.keras.layers.Dense(units=x_latent_stddev.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x_latent_stddev.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
-
-        x_label_gamma = tf.keras.layers.Dense(units=x_latent_stddev.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x_latent_stddev.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
-
-        x_latent_stddev = tf.keras.layers.Multiply()([x_latent_stddev, x_label_gamma])
-        x_latent_stddev = tf.keras.layers.Add()([x_latent_stddev, x_label_beta])
-        x_latent_stddev = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_latent_stddev)
-
-    x_res = tf.keras.layers.Conv2D(filters=x_latent_stddev.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
-    x_latent_stddev = tf.keras.layers.Add()([x_latent_stddev, x_res])
-
-    x_latent_stddev = tf.keras.layers.Conv2D(filters=x_latent_gaussian_input.shape[-1],
-                                             kernel_size=(3, 3),
-                                             strides=(1, 1),
-                                             padding="same",
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_latent_stddev)
+    x_latent_stddev = x[:, :, :, latent_filters:]
     x_latent_stddev = tf.keras.layers.Lambda(tf.keras.activations.softplus)(x_latent_stddev)
     x_latent_stddev = tf.keras.layers.Lambda(lambda x_current: x_current + tf.keras.backend.epsilon())(x_latent_stddev)
 
@@ -1191,21 +1215,25 @@ def get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels):
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+        x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning))
+        x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning_beta_gamma))
 
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+        x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-        x = tf.keras.layers.Multiply()([x, x_label_gamma])
-        x = tf.keras.layers.Add()([x, x_label_beta])
+        x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+        x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+        x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
     x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -1216,14 +1244,14 @@ def get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels):
     x = tf.keras.layers.Add()([x, x_res])
 
     for i in range(filters_len - 2, -1, -1):
-        x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
-                                                                "c2": 2,
-                                                                "c3": 2})(x)
-        x = tf.keras.layers.Conv2D(filters=filters[i],
-                                   kernel_size=(3, 3),
+        x = tf.keras.layers.Conv2D(filters=int(np.round(filters[i] * 4.0)),
+                                   kernel_size=(1, 1),
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
+                                                                "c2": 2,
+                                                                "c3": 2})(x)
 
         x_res = x
 
@@ -1233,21 +1261,25 @@ def get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels):
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+            x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning))
+            x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning_beta_gamma))
 
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+            x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-            x = tf.keras.layers.Multiply()([x, x_label_gamma])
-            x = tf.keras.layers.Add()([x, x_label_beta])
+            x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+            x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+            x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+            x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
         x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -1288,15 +1320,21 @@ def get_model_conv_alex_discrete(x_train_images, x_train_labels):
                                padding="same",
                                kernel_initializer=tf.keras.initializers.orthogonal)(x_image_input)
 
+    conditioning_inputs_size = int(np.round((filters[-1] * 2)))
+
+    conditioning_inputs_size = int(np.round((filters[-1] * 2)))
+
     x_label = (tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
-                                         output_dim=filters[-1],
-                                         embeddings_initializer=tf.keras.initializers.RandomNormal(stddev=1.0))
+                                         output_dim=conditioning_inputs_size,
+                                         embeddings_initializer=tf.keras.initializers.orthogonal)
                (x_label_input))
     x_label = x_label[:, 0]
 
+    x_conditioning = x_label
+
     for i in range(conditional_dense_layers):
-        x_label = tf.keras.layers.Dense(units=filters[-1])(x_label)
-        x_label = tf.keras.layers.Lambda(tf.keras.activations.relu)(x_label)
+        x_conditioning = tf.keras.layers.Dense(units=conditioning_inputs_size)(x_conditioning)
+        x_conditioning = tf.keras.layers.Lambda(tf.keras.activations.relu)(x_conditioning)
 
     filters_len = len(filters)
 
@@ -1309,21 +1347,25 @@ def get_model_conv_alex_discrete(x_train_images, x_train_labels):
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+            x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning))
+            x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning_beta_gamma))
 
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+            x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-            x = tf.keras.layers.Multiply()([x, x_label_gamma])
-            x = tf.keras.layers.Add()([x, x_label_beta])
+            x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+            x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+            x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+            x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
         x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -1333,14 +1375,14 @@ def get_model_conv_alex_discrete(x_train_images, x_train_labels):
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-        x = tf.keras.layers.Conv2D(filters=filters[i],
-                                   kernel_size=(3, 3),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b (h1 h2) (w1 w2) c -> b h1 w1 (c h2 w2)",
                                                                 "h2": 2,
                                                                 "w2": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(1, 1),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
     x_res = x
 
@@ -1350,21 +1392,25 @@ def get_model_conv_alex_discrete(x_train_images, x_train_labels):
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+        x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning))
+        x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning_beta_gamma))
 
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+        x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-        x = tf.keras.layers.Multiply()([x, x_label_gamma])
-        x = tf.keras.layers.Add()([x, x_label_beta])
+        x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+        x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+        x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
     x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -1377,7 +1423,9 @@ def get_model_conv_alex_discrete(x_train_images, x_train_labels):
     if num_heads is not None and key_dim is not None:
         x_res = x
 
-        x = Standardiser()(x)  # noqa
+        x = tf.keras.layers.GroupNormalization(groups=1,
+                                               center=False,
+                                               scale=False)(x)  # noqa
 
         x_shape = x.shape
         x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
@@ -1395,41 +1443,14 @@ def get_model_conv_alex_discrete(x_train_images, x_train_labels):
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
         x = tf.keras.layers.Add()([x_res, x])
 
-        x_res = x
-
-        for j in range(conv_layers[-1]):
-            x = tf.keras.layers.Conv2D(filters=filters[-1],
-                                       kernel_size=(3, 3),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x)
-
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
-
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
-
-            x = tf.keras.layers.Multiply()([x, x_label_gamma])
-            x = tf.keras.layers.Add()([x, x_label_beta])
-            x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
-
-        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                       kernel_size=(1, 1),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
-        x = tf.keras.layers.Add()([x, x_res])
-
-    x_shape_prod = tf.math.reduce_prod(x.shape[1:-1]).numpy()
-    x_latent_quantised, x_latent_discretised = VectorQuantiser(embedding_dim=x_shape_prod,  # noqa
-                                                               num_embeddings=num_embeddings)(x)
+    x_latent = tf.keras.layers.Conv2D(filters=latent_filters,
+                                      kernel_size=(1, 1),
+                                      strides=(1, 1),
+                                      padding="same",
+                                      kernel_initializer=tf.keras.initializers.orthogonal)(x)
+    x_latent_shape_prod = tf.math.reduce_prod(x_latent.shape[1:-1]).numpy()
+    x_latent_quantised, x_latent_discretised = VectorQuantiser(embedding_dim=x_latent_shape_prod,  # noqa
+                                                               num_embeddings=num_embeddings)(x_latent)
 
     x = x_latent_quantised
 
@@ -1441,22 +1462,25 @@ def get_model_conv_alex_discrete(x_train_images, x_train_labels):
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+        x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning))
+        x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning_beta_gamma))
 
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = (tf.keras.layers.Dense(units=x.shape[-1],
-                                               kernel_initializer=tf.keras.initializers.orthogonal)
-                         (x_label_gamma))
+        x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-        x = tf.keras.layers.Multiply()([x, x_label_gamma])
-        x = tf.keras.layers.Add()([x, x_label_beta])
+        x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+        x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+        x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
     x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -1467,14 +1491,14 @@ def get_model_conv_alex_discrete(x_train_images, x_train_labels):
     x = tf.keras.layers.Add()([x, x_res])
 
     for i in range(filters_len - 2, -1, -1):
-        x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
-                                                                "c2": 2,
-                                                                "c3": 2})(x)
-        x = tf.keras.layers.Conv2D(filters=filters[i],
-                                   kernel_size=(3, 3),
+        x = tf.keras.layers.Conv2D(filters=int(np.round(filters[i] * 4.0)),
+                                   kernel_size=(1, 1),
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
+                                                                "c2": 2,
+                                                                "c3": 2})(x)
 
         x_res = x
 
@@ -1484,21 +1508,25 @@ def get_model_conv_alex_discrete(x_train_images, x_train_labels):
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+            x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning))
+            x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning_beta_gamma))
 
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+            x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-            x = tf.keras.layers.Multiply()([x, x_label_gamma])
-            x = tf.keras.layers.Add()([x, x_label_beta])
+            x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+            x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+            x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+            x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
         x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -1539,15 +1567,19 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
                                padding="same",
                                kernel_initializer=tf.keras.initializers.orthogonal)(x_image_input)
 
+    conditioning_inputs_size = int(np.round((filters[-1] * 2)))
+
     x_label = (tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
-                                         output_dim=filters[-1],
-                                         embeddings_initializer=tf.keras.initializers.RandomNormal(stddev=1.0))
+                                         output_dim=conditioning_inputs_size,
+                                         embeddings_initializer=tf.keras.initializers.orthogonal)
                (x_label_input))
     x_label = x_label[:, 0]
 
+    x_conditioning = x_label
+
     for i in range(conditional_dense_layers):
-        x_label = tf.keras.layers.Dense(units=filters[-1])(x_label)
-        x_label = tf.keras.layers.Lambda(tf.keras.activations.relu)(x_label)
+        x_conditioning = tf.keras.layers.Dense(units=conditioning_inputs_size)(x_conditioning)
+        x_conditioning = tf.keras.layers.Lambda(tf.keras.activations.relu)(x_conditioning)
 
     filters_len = len(filters)
 
@@ -1560,21 +1592,25 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+            x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning))
+            x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning_beta_gamma))
 
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+            x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-            x = tf.keras.layers.Multiply()([x, x_label_gamma])
-            x = tf.keras.layers.Add()([x, x_label_beta])
+            x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+            x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+            x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+            x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
         x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -1584,14 +1620,14 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-        x = tf.keras.layers.Conv2D(filters=filters[i],
-                                   kernel_size=(3, 3),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b (h1 h2) (w1 w2) c -> b h1 w1 (c h2 w2)",
                                                                 "h2": 2,
                                                                 "w2": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(1, 1),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
     x_res = x
 
@@ -1601,21 +1637,25 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+        x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning))
+        x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning_beta_gamma))
 
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+        x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-        x = tf.keras.layers.Multiply()([x, x_label_gamma])
-        x = tf.keras.layers.Add()([x, x_label_beta])
+        x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+        x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+        x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
     x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -1628,7 +1668,9 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
     if num_heads is not None and key_dim is not None:
         x_res = x
 
-        x = Standardiser()(x)  # noqa
+        x = tf.keras.layers.GroupNormalization(groups=1,
+                                               center=False,
+                                               scale=False)(x)  # noqa
 
         x_shape = x.shape
         x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
@@ -1646,39 +1688,13 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
         x = tf.keras.layers.Add()([x_res, x])
 
-        x_res = x
+    x_latent = tf.keras.layers.Conv2D(filters=latent_filters,
+                                      kernel_size=(1, 1),
+                                      strides=(1, 1),
+                                      padding="same",
+                                      kernel_initializer=tf.keras.initializers.orthogonal)(x)
+    x = x_latent
 
-        for j in range(conv_layers[-1]):
-            x = tf.keras.layers.Conv2D(filters=filters[-1],
-                                       kernel_size=(3, 3),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x)
-
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
-
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
-
-            x = tf.keras.layers.Multiply()([x, x_label_gamma])
-            x = tf.keras.layers.Add()([x, x_label_beta])
-            x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
-
-        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                       kernel_size=(1, 1),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
-        x = tf.keras.layers.Add()([x, x_res])
-
-    x_latent = x
     x_res = x
 
     for i in range(conv_layers[-1]):
@@ -1687,21 +1703,25 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+        x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning))
+        x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning_beta_gamma))
 
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+        x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-        x = tf.keras.layers.Multiply()([x, x_label_gamma])
-        x = tf.keras.layers.Add()([x, x_label_beta])
+        x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+        x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+        x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
     x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -1712,14 +1732,14 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
     x = tf.keras.layers.Add()([x, x_res])
 
     for i in range(filters_len - 2, -1, -1):
-        x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
-                                                                "c2": 2,
-                                                                "c3": 2})(x)
-        x = tf.keras.layers.Conv2D(filters=filters[i],
-                                   kernel_size=(3, 3),
+        x = tf.keras.layers.Conv2D(filters=int(np.round(filters[i] * 4.0)),
+                                   kernel_size=(1, 1),
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
+                                                                "c2": 2,
+                                                                "c3": 2})(x)
 
         x_res = x
 
@@ -1729,21 +1749,25 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+            x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning))
+            x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning_beta_gamma))
 
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+            x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-            x = tf.keras.layers.Multiply()([x, x_label_gamma])
-            x = tf.keras.layers.Add()([x, x_label_beta])
+            x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+            x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+            x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+            x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
         x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -1753,83 +1777,55 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-    x_mean = x
     x_res = x
 
-    for i in range(conv_layers[0]):
-        x_mean = tf.keras.layers.Conv2D(filters=filters[0],
-                                        kernel_size=(3, 3),
-                                        strides=(1, 1),
-                                        padding="same",
-                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_mean)
+    x_mean_stddev_filters = int(np.round(filters[0] * 2.0))
 
-        x_label_beta = tf.keras.layers.Dense(units=x_mean.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x_mean.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+    for i in range(conv_layers[-1]):
+        x = tf.keras.layers.Conv2D(filters=x_mean_stddev_filters,
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_label_gamma = tf.keras.layers.Dense(units=x_mean.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x_mean.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+        x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning))
+        x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning_beta_gamma))
 
-        x_mean = tf.keras.layers.Multiply()([x_mean, x_label_gamma])
-        x_mean = tf.keras.layers.Add()([x_mean, x_label_beta])
-        x_mean = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_mean)
+        x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-    x_res = tf.keras.layers.Conv2D(filters=x_mean.shape[-1],
+        x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+        x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+        x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
+        x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
+
+    x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                    kernel_size=(1, 1),
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
-    x_mean = tf.keras.layers.Add()([x_mean, x_res])
+    x = tf.keras.layers.Add()([x, x_res])
 
-    x_mean = tf.keras.layers.Conv2D(filters=image_input_shape[-1],
-                                    kernel_size=(3, 3),
-                                    strides=(1, 1),
-                                    padding="same",
-                                    kernel_initializer=tf.keras.initializers.zeros)(x_mean)
+    x_mean_stddev_filters = int(np.round(image_input_shape[-1] * 2.0))
 
-    x_stddev = x
-    x_res = x
+    x = tf.keras.layers.Conv2D(filters=x_mean_stddev_filters,
+                               kernel_size=(1, 1),
+                               strides=(1, 1),
+                               padding="same",
+                               kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
-    for i in range(conv_layers[0]):
-        x_stddev = tf.keras.layers.Conv2D(filters=filters[0],
-                                          kernel_size=(3, 3),
-                                          strides=(1, 1),
-                                          padding="same",
-                                          kernel_initializer=tf.keras.initializers.orthogonal)(x_stddev)
+    x_mean = x[:, :, :, :image_input_shape[-1]]
 
-        x_label_beta = tf.keras.layers.Dense(units=x_stddev.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x_stddev.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
-
-        x_label_gamma = tf.keras.layers.Dense(units=x_stddev.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x_stddev.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
-
-        x_stddev = tf.keras.layers.Multiply()([x_stddev, x_label_gamma])
-        x_stddev = tf.keras.layers.Add()([x_stddev, x_label_beta])
-        x_stddev = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_stddev)
-
-    x_res = tf.keras.layers.Conv2D(filters=x_stddev.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
-    x_stddev = tf.keras.layers.Add()([x_stddev, x_res])
-
-    x_stddev = tf.keras.layers.Conv2D(filters=image_input_shape[-1],
-                                      kernel_size=(3, 3),
-                                      strides=(1, 1),
-                                      padding="same",
-                                      kernel_initializer=tf.keras.initializers.orthogonal)(x_stddev)
+    x_stddev = x[:, :, :, image_input_shape[-1]:]
     x_stddev = tf.keras.layers.Lambda(tf.keras.activations.softplus)(x_stddev)
     x_stddev = tf.keras.layers.Lambda(lambda x_current: x_current + tf.keras.backend.epsilon())(x_stddev)
 
@@ -1853,7 +1849,7 @@ def get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train
     x_label_input = tf.keras.Input(shape=x_train_labels.shape[1:])
 
     latent_x_y_size = int(np.round(image_input_shape[0] / np.power(2.0, len(filters) - 1.0)))
-    latent_shape = (latent_x_y_size, latent_x_y_size, filters[-1])
+    latent_shape = (latent_x_y_size, latent_x_y_size, latent_filters)
 
     x_latent_gaussian_input = tf.keras.Input(shape=latent_shape)
 
@@ -1863,15 +1859,19 @@ def get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train
                                padding="same",
                                kernel_initializer=tf.keras.initializers.orthogonal)(x_image_input)
 
+    conditioning_inputs_size = int(np.round((filters[-1] * 2)))
+
     x_label = (tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
-                                         output_dim=filters[-1],
-                                         embeddings_initializer=tf.keras.initializers.RandomNormal(stddev=1.0))
+                                         output_dim=conditioning_inputs_size,
+                                         embeddings_initializer=tf.keras.initializers.orthogonal)
                (x_label_input))
     x_label = x_label[:, 0]
 
+    x_conditioning = x_label
+
     for i in range(conditional_dense_layers):
-        x_label = tf.keras.layers.Dense(units=filters[-1])(x_label)
-        x_label = tf.keras.layers.Lambda(tf.keras.activations.relu)(x_label)
+        x_conditioning = tf.keras.layers.Dense(units=conditioning_inputs_size)(x_conditioning)
+        x_conditioning = tf.keras.layers.Lambda(tf.keras.activations.relu)(x_conditioning)
 
     filters_len = len(filters)
 
@@ -1884,21 +1884,25 @@ def get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+            x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning))
+            x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning_beta_gamma))
 
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+            x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-            x = tf.keras.layers.Multiply()([x, x_label_gamma])
-            x = tf.keras.layers.Add()([x, x_label_beta])
+            x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+            x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+            x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+            x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
         x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -1908,14 +1912,14 @@ def get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-        x = tf.keras.layers.Conv2D(filters=filters[i],
-                                   kernel_size=(3, 3),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b (h1 h2) (w1 w2) c -> b h1 w1 (c h2 w2)",
                                                                 "h2": 2,
                                                                 "w2": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(1, 1),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
     x_res = x
 
@@ -1925,21 +1929,25 @@ def get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+        x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning))
+        x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning_beta_gamma))
 
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+        x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-        x = tf.keras.layers.Multiply()([x, x_label_gamma])
-        x = tf.keras.layers.Add()([x, x_label_beta])
+        x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+        x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+        x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
     x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -1952,7 +1960,9 @@ def get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train
     if num_heads is not None and key_dim is not None:
         x_res = x
 
-        x = Standardiser()(x)  # noqa
+        x = tf.keras.layers.GroupNormalization(groups=1,
+                                               center=False,
+                                               scale=False)(x)  # noqa
 
         x_shape = x.shape
         x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
@@ -1970,83 +1980,55 @@ def get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
         x = tf.keras.layers.Add()([x_res, x])
 
-    x_latent_mean = x
     x_res = x
 
+    x_latent_mean_stddev_filters = int(np.round(filters[-1] * 2.0))
+
     for i in range(conv_layers[-1]):
-        x_latent_mean = tf.keras.layers.Conv2D(filters=filters[-1],
-                                               kernel_size=(3, 3),
-                                               strides=(1, 1),
-                                               padding="same",
-                                               kernel_initializer=tf.keras.initializers.orthogonal)(x_latent_mean)
+        x = tf.keras.layers.Conv2D(filters=x_latent_mean_stddev_filters,
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_label_beta = tf.keras.layers.Dense(units=x_latent_mean.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x_latent_mean.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+        x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning))
+        x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning_beta_gamma))
 
-        x_label_gamma = tf.keras.layers.Dense(units=x_latent_mean.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x_latent_mean.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+        x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-        x_latent_mean = tf.keras.layers.Multiply()([x_latent_mean, x_label_gamma])
-        x_latent_mean = tf.keras.layers.Add()([x_latent_mean, x_label_beta])
-        x_latent_mean = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_latent_mean)
+        x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+        x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
 
-    x_res = tf.keras.layers.Conv2D(filters=x_latent_mean.shape[-1],
+        x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+        x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
+        x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
+
+    x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                    kernel_size=(1, 1),
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
-    x_latent_mean = tf.keras.layers.Add()([x_latent_mean, x_res])
+    x = tf.keras.layers.Add()([x, x_res])
 
-    x_latent_mean = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                           kernel_size=(3, 3),
-                                           strides=(1, 1),
-                                           padding="same",
-                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_latent_mean)
+    x_latent_mean_stddev_filters = int(np.round(latent_filters * 2.0))
 
-    x_latent_stddev = x
-    x_res = x
+    x = tf.keras.layers.Conv2D(filters=x_latent_mean_stddev_filters,
+                               kernel_size=(1, 1),
+                               strides=(1, 1),
+                               padding="same",
+                               kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
-    for i in range(conv_layers[-1]):
-        x_latent_stddev = tf.keras.layers.Conv2D(filters=filters[-1],
-                                                 kernel_size=(3, 3),
-                                                 strides=(1, 1),
-                                                 padding="same",
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_latent_stddev)
+    x_latent_mean = x[:, :, :, :latent_filters]
 
-        x_label_beta = tf.keras.layers.Dense(units=x_latent_stddev.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x_latent_stddev.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
-
-        x_label_gamma = tf.keras.layers.Dense(units=x_latent_stddev.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x_latent_stddev.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
-
-        x_latent_stddev = tf.keras.layers.Multiply()([x_latent_stddev, x_label_gamma])
-        x_latent_stddev = tf.keras.layers.Add()([x_latent_stddev, x_label_beta])
-        x_latent_stddev = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_latent_stddev)
-
-    x_res = tf.keras.layers.Conv2D(filters=x_latent_stddev.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
-    x_latent_stddev = tf.keras.layers.Add()([x_latent_stddev, x_res])
-
-    x_latent_stddev = tf.keras.layers.Conv2D(filters=x_latent_gaussian_input.shape[-1],
-                                             kernel_size=(3, 3),
-                                             strides=(1, 1),
-                                             padding="same",
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_latent_stddev)
+    x_latent_stddev = x[:, :, :, latent_filters:]
     x_latent_stddev = tf.keras.layers.Lambda(tf.keras.activations.softplus)(x_latent_stddev)
     x_latent_stddev = tf.keras.layers.Lambda(lambda x_current: x_current + tf.keras.backend.epsilon())(x_latent_stddev)
 
@@ -2061,21 +2043,25 @@ def get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+        x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning))
+        x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning_beta_gamma))
 
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+        x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-        x = tf.keras.layers.Multiply()([x, x_label_gamma])
-        x = tf.keras.layers.Add()([x, x_label_beta])
+        x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+        x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+        x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
     x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -2086,14 +2072,14 @@ def get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train
     x = tf.keras.layers.Add()([x, x_res])
 
     for i in range(filters_len - 2, -1, -1):
-        x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
-                                                                "c2": 2,
-                                                                "c3": 2})(x)
-        x = tf.keras.layers.Conv2D(filters=filters[i],
-                                   kernel_size=(3, 3),
+        x = tf.keras.layers.Conv2D(filters=int(np.round(filters[i] * 4.0)),
+                                   kernel_size=(1, 1),
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
+                                                                "c2": 2,
+                                                                "c3": 2})(x)
 
         x_res = x
 
@@ -2103,21 +2089,25 @@ def get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+            x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning))
+            x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning_beta_gamma))
 
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+            x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-            x = tf.keras.layers.Multiply()([x, x_label_gamma])
-            x = tf.keras.layers.Add()([x, x_label_beta])
+            x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+            x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+            x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+            x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
         x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -2127,83 +2117,55 @@ def get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-    x_mean = x
     x_res = x
 
-    for i in range(conv_layers[0]):
-        x_mean = tf.keras.layers.Conv2D(filters=filters[0],
-                                        kernel_size=(3, 3),
-                                        strides=(1, 1),
-                                        padding="same",
-                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_mean)
+    x_mean_stddev_filters = int(np.round(filters[0] * 2.0))
 
-        x_label_beta = tf.keras.layers.Dense(units=x_mean.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x_mean.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+    for i in range(conv_layers[-1]):
+        x = tf.keras.layers.Conv2D(filters=x_mean_stddev_filters,
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_label_gamma = tf.keras.layers.Dense(units=x_mean.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x_mean.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+        x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning))
+        x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning_beta_gamma))
 
-        x_mean = tf.keras.layers.Multiply()([x_mean, x_label_gamma])
-        x_mean = tf.keras.layers.Add()([x_mean, x_label_beta])
-        x_mean = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_mean)
+        x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-    x_res = tf.keras.layers.Conv2D(filters=x_mean.shape[-1],
+        x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+        x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+        x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
+        x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
+
+    x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                    kernel_size=(1, 1),
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
-    x_mean = tf.keras.layers.Add()([x_mean, x_res])
+    x = tf.keras.layers.Add()([x, x_res])
 
-    x_mean = tf.keras.layers.Conv2D(filters=image_input_shape[-1],
-                                    kernel_size=(3, 3),
-                                    strides=(1, 1),
-                                    padding="same",
-                                    kernel_initializer=tf.keras.initializers.zeros)(x_mean)
+    x_mean_stddev_filters = int(np.round(image_input_shape[-1] * 2.0))
 
-    x_stddev = x
-    x_res = x
+    x = tf.keras.layers.Conv2D(filters=x_mean_stddev_filters,
+                               kernel_size=(1, 1),
+                               strides=(1, 1),
+                               padding="same",
+                               kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
-    for i in range(conv_layers[0]):
-        x_stddev = tf.keras.layers.Conv2D(filters=filters[0],
-                                          kernel_size=(3, 3),
-                                          strides=(1, 1),
-                                          padding="same",
-                                          kernel_initializer=tf.keras.initializers.orthogonal)(x_stddev)
+    x_mean = x[:, :, :, :image_input_shape[-1]]
 
-        x_label_beta = tf.keras.layers.Dense(units=x_stddev.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x_stddev.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
-
-        x_label_gamma = tf.keras.layers.Dense(units=x_stddev.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x_stddev.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
-
-        x_stddev = tf.keras.layers.Multiply()([x_stddev, x_label_gamma])
-        x_stddev = tf.keras.layers.Add()([x_stddev, x_label_beta])
-        x_stddev = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_stddev)
-
-    x_res = tf.keras.layers.Conv2D(filters=x_stddev.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
-    x_stddev = tf.keras.layers.Add()([x_stddev, x_res])
-
-    x_stddev = tf.keras.layers.Conv2D(filters=image_input_shape[-1],
-                                      kernel_size=(3, 3),
-                                      strides=(1, 1),
-                                      padding="same",
-                                      kernel_initializer=tf.keras.initializers.orthogonal)(x_stddev)
+    x_stddev = x[:, :, :, image_input_shape[-1]:]
     x_stddev = tf.keras.layers.Lambda(tf.keras.activations.softplus)(x_stddev)
     x_stddev = tf.keras.layers.Lambda(lambda x_current: x_current + tf.keras.backend.epsilon())(x_stddev)
 
@@ -2232,15 +2194,19 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
                                padding="same",
                                kernel_initializer=tf.keras.initializers.orthogonal)(x_image_input)
 
+    conditioning_inputs_size = int(np.round((filters[-1] * 2)))
+
     x_label = (tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
-                                         output_dim=filters[-1],
-                                         embeddings_initializer=tf.keras.initializers.RandomNormal(stddev=1.0))
+                                         output_dim=conditioning_inputs_size,
+                                         embeddings_initializer=tf.keras.initializers.orthogonal)
                (x_label_input))
     x_label = x_label[:, 0]
 
+    x_conditioning = x_label
+
     for i in range(conditional_dense_layers):
-        x_label = tf.keras.layers.Dense(units=filters[-1])(x_label)
-        x_label = tf.keras.layers.Lambda(tf.keras.activations.relu)(x_label)
+        x_conditioning = tf.keras.layers.Dense(units=conditioning_inputs_size)(x_conditioning)
+        x_conditioning = tf.keras.layers.Lambda(tf.keras.activations.relu)(x_conditioning)
 
     filters_len = len(filters)
 
@@ -2253,21 +2219,25 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+            x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning))
+            x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning_beta_gamma))
 
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+            x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-            x = tf.keras.layers.Multiply()([x, x_label_gamma])
-            x = tf.keras.layers.Add()([x, x_label_beta])
+            x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+            x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+            x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+            x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
         x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -2277,14 +2247,14 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-        x = tf.keras.layers.Conv2D(filters=filters[i],
-                                   kernel_size=(3, 3),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b (h1 h2) (w1 w2) c -> b h1 w1 (c h2 w2)",
                                                                 "h2": 2,
                                                                 "w2": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(1, 1),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
     x_res = x
 
@@ -2294,21 +2264,25 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+        x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning))
+        x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning_beta_gamma))
 
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+        x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-        x = tf.keras.layers.Multiply()([x, x_label_gamma])
-        x = tf.keras.layers.Add()([x, x_label_beta])
+        x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+        x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+        x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
     x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -2321,7 +2295,9 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
     if num_heads is not None and key_dim is not None:
         x_res = x
 
-        x = Standardiser()(x)  # noqa
+        x = tf.keras.layers.GroupNormalization(groups=1,
+                                               center=False,
+                                               scale=False)(x)  # noqa
 
         x_shape = x.shape
         x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
@@ -2339,41 +2315,14 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
         x = tf.keras.layers.Add()([x_res, x])
 
-        x_res = x
-
-        for j in range(conv_layers[-1]):
-            x = tf.keras.layers.Conv2D(filters=filters[-1],
-                                       kernel_size=(3, 3),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x)
-
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
-
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
-
-            x = tf.keras.layers.Multiply()([x, x_label_gamma])
-            x = tf.keras.layers.Add()([x, x_label_beta])
-            x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
-
-        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                       kernel_size=(1, 1),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
-        x = tf.keras.layers.Add()([x, x_res])
-
-    x_shape_prod = tf.math.reduce_prod(x.shape[1:-1]).numpy()
-    x_latent_quantised, x_latent_discretised = VectorQuantiser(embedding_dim=x_shape_prod,  # noqa
-                                                               num_embeddings=num_embeddings)(x)
+    x_latent = tf.keras.layers.Conv2D(filters=latent_filters,
+                                      kernel_size=(1, 1),
+                                      strides=(1, 1),
+                                      padding="same",
+                                      kernel_initializer=tf.keras.initializers.orthogonal)(x)
+    x_latent_shape_prod = tf.math.reduce_prod(x_latent.shape[1:-1]).numpy()
+    x_latent_quantised, x_latent_discretised = VectorQuantiser(embedding_dim=x_latent_shape_prod,  # noqa
+                                                               num_embeddings=num_embeddings)(x_latent)
 
     x = x_latent_quantised
 
@@ -2385,22 +2334,25 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+        x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning))
+        x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning_beta_gamma))
 
-        x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = (tf.keras.layers.Dense(units=x.shape[-1],
-                                               kernel_initializer=tf.keras.initializers.orthogonal)
-                         (x_label_gamma))
+        x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-        x = tf.keras.layers.Multiply()([x, x_label_gamma])
-        x = tf.keras.layers.Add()([x, x_label_beta])
+        x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+        x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+        x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
     x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -2411,14 +2363,14 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
     x = tf.keras.layers.Add()([x, x_res])
 
     for i in range(filters_len - 2, -1, -1):
-        x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
-                                                                "c2": 2,
-                                                                "c3": 2})(x)
-        x = tf.keras.layers.Conv2D(filters=filters[i],
-                                   kernel_size=(3, 3),
+        x = tf.keras.layers.Conv2D(filters=int(np.round(filters[i] * 4.0)),
+                                   kernel_size=(1, 1),
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
+                                                                "c2": 2,
+                                                                "c3": 2})(x)
 
         x_res = x
 
@@ -2428,21 +2380,25 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-            x_label_beta = tf.keras.layers.Dense(units=x.shape[-1],
-                                                 kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+            x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning))
+            x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+            x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_conditioning_beta_gamma))
 
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-            x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-            x_label_gamma = tf.keras.layers.Dense(units=x.shape[-1],
-                                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+            x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
 
-            x = tf.keras.layers.Multiply()([x, x_label_gamma])
-            x = tf.keras.layers.Add()([x, x_label_beta])
+            x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+            x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+            x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+            x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
         x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -2452,83 +2408,55 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-    x_mean = x
     x_res = x
 
-    for i in range(conv_layers[0]):
-        x_mean = tf.keras.layers.Conv2D(filters=filters[0],
-                                        kernel_size=(3, 3),
-                                        strides=(1, 1),
-                                        padding="same",
-                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_mean)
+    x_mean_stddev_filters = int(np.round(filters[0] * 2.0))
 
-        x_label_beta = tf.keras.layers.Dense(units=x_mean.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x_mean.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
+    for i in range(conv_layers[-1]):
+        x = tf.keras.layers.Conv2D(filters=x_mean_stddev_filters,
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8)(x)
 
-        x_label_gamma = tf.keras.layers.Dense(units=x_mean.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x_mean.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
+        x_conditioning_beta_gamma_units = int(np.round(x.shape[-1] * 2.0))
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning))
+        x_conditioning_beta_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning_beta_gamma)
+        x_conditioning_beta_gamma = (tf.keras.layers.Dense(units=x_conditioning_beta_gamma_units,
+                                                           kernel_initializer=tf.keras.initializers.orthogonal)
+                                     (x_conditioning_beta_gamma))
 
-        x_mean = tf.keras.layers.Multiply()([x_mean, x_label_gamma])
-        x_mean = tf.keras.layers.Add()([x_mean, x_label_beta])
-        x_mean = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_mean)
+        x_conditioning_beta = x_conditioning_beta_gamma[:, :x.shape[-1]]
+
+        x_conditioning_gamma = x_conditioning_beta_gamma[:, x.shape[-1]:]
+        x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
+
+        x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
+        x = tf.keras.layers.Add()([x, x_conditioning_beta])
+
+        x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
     x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                    kernel_size=(1, 1),
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
-    x_mean = tf.keras.layers.Add()([x_mean, x_res])
+    x = tf.keras.layers.Add()([x, x_res])
 
-    x_mean = tf.keras.layers.Conv2D(filters=image_input_shape[-1],
-                                    kernel_size=(3, 3),
-                                    strides=(1, 1),
-                                    padding="same",
-                                    kernel_initializer=tf.keras.initializers.zeros)(x_mean)
+    x_mean_stddev_filters = int(np.round(image_input_shape[-1] * 2.0))
 
-    x_stddev = x
-    x_res = x
+    x = tf.keras.layers.Conv2D(filters=x_mean_stddev_filters,
+                               kernel_size=(1, 1),
+                               strides=(1, 1),
+                               padding="same",
+                               kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
-    for i in range(conv_layers[0]):
-        x_stddev = tf.keras.layers.Conv2D(filters=filters[0],
-                                          kernel_size=(3, 3),
-                                          strides=(1, 1),
-                                          padding="same",
-                                          kernel_initializer=tf.keras.initializers.orthogonal)(x_stddev)
+    x_mean = x[:, :, :, :image_input_shape[-1]]
 
-        x_label_beta = tf.keras.layers.Dense(units=x_stddev.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_beta = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_beta)
-        x_label_beta = tf.keras.layers.Dense(units=x_stddev.shape[-1],
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_label_beta)
-
-        x_label_gamma = tf.keras.layers.Dense(units=x_stddev.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label)
-        x_label_gamma = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_label_gamma)
-        x_label_gamma = tf.keras.layers.Dense(units=x_stddev.shape[-1],
-                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_label_gamma)
-
-        x_stddev = tf.keras.layers.Multiply()([x_stddev, x_label_gamma])
-        x_stddev = tf.keras.layers.Add()([x_stddev, x_label_beta])
-        x_stddev = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_stddev)
-
-    x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
-    x_stddev = tf.keras.layers.Add()([x_stddev, x_res])
-
-    x_stddev = tf.keras.layers.Conv2D(filters=image_input_shape[-1],
-                                      kernel_size=(3, 3),
-                                      strides=(1, 1),
-                                      padding="same",
-                                      kernel_initializer=tf.keras.initializers.orthogonal)(x_stddev)
+    x_stddev = x[:, :, :, image_input_shape[-1]:]
     x_stddev = tf.keras.layers.Lambda(tf.keras.activations.softplus)(x_stddev)
     x_stddev = tf.keras.layers.Lambda(lambda x_current: x_current + tf.keras.backend.epsilon())(x_stddev)
 
@@ -2618,14 +2546,20 @@ def translate_image(image):
     return translated_image
 
 
-def crop_image(image, output_dimension_size):
+def crop_image(image, output_dimension_size, output_shape=None):
     cropped_image = copy.deepcopy(image)
+
+    if output_shape is not None:
+        output_dimension_size = output_shape[0]
 
     while cropped_image.shape[0] - 1 > output_dimension_size:
         cropped_image = cropped_image[1:-1]
 
     if cropped_image.shape[0] > output_dimension_size:
         cropped_image = cropped_image[1:]
+
+    if output_shape is not None:
+        output_dimension_size = output_shape[1]
 
     while cropped_image.shape[1] - 1 > output_dimension_size:
         cropped_image = cropped_image[:, 1:-1]
@@ -2636,10 +2570,13 @@ def crop_image(image, output_dimension_size):
     return cropped_image
 
 
-def augmentation(image):
+def augmentation(image, original_shape, padding_mask):
     augmented_image = image.numpy()
 
-    input_dimension_size = augmented_image.shape[0]
+    input_shape = augmented_image.shape
+
+    augmented_image = augmented_image[padding_mask]
+    augmented_image = np.reshape(augmented_image, original_shape)
 
     augmented_image = flip_image(augmented_image)
 
@@ -2662,8 +2599,10 @@ def augmentation(image):
     if translate_bool:
         augmented_image = translate_image(augmented_image)
 
-    augmented_image = pad_image(augmented_image, input_dimension_size)
-    augmented_image = crop_image(augmented_image, input_dimension_size)
+    augmented_image = pad_image(augmented_image, None, original_shape)
+    augmented_image = crop_image(augmented_image, None, original_shape)
+
+    augmented_image = pad_image(augmented_image, None, input_shape)
 
     augmented_image = tf.convert_to_tensor(augmented_image)
 
@@ -2755,7 +2694,7 @@ def validate(model, x_test_images, x_test_original_shapes, x_test_padding_masks,
     current_x_test_label = tf.expand_dims(current_x_test_label, axis=0)
 
     latent_x_y_size = int(np.round(current_x_test_image.shape[1] / np.power(2.0, len(filters) - 1.0)))
-    latent_shape = (latent_x_y_size, latent_x_y_size, filters[-1])
+    latent_shape = (latent_x_y_size, latent_x_y_size, latent_filters)
 
     if conv_bool and alex_bool:
         if gaussian_negative_log_likelihood_bool:
@@ -2839,7 +2778,7 @@ def validate(model, x_test_images, x_test_original_shapes, x_test_padding_masks,
                 else:
                     y_pred, y_latent = (model([current_x_test_image, current_x_test_label], training=False))
     else:
-        y_pred = model([current_x_test_image], training=False)
+        y_pred, x_latent = model([current_x_test_image], training=False)
 
     output_image(y_pred[0], current_x_test_original_shape, current_x_test_padding_mask[0], standard_scaler,
                  "{0}/{1}.png".format(validate_output_path, str(i)))
@@ -2852,8 +2791,8 @@ def validate(model, x_test_images, x_test_original_shapes, x_test_padding_masks,
 
 
 def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images,
-                                x_train_padding_masks, x_test_images, x_test_original_shapes, x_test_padding_masks,
-                                standard_scaler, x_train_labels, x_test_labels):
+                                x_train_output_shapes, x_train_padding_masks, x_test_images, x_test_original_shapes,
+                                x_test_padding_masks, standard_scaler, x_train_labels, x_test_labels):
     print("train")
 
     validate(model, x_test_images, x_test_original_shapes, x_test_padding_masks, standard_scaler, x_test_labels, 0)
@@ -2869,7 +2808,7 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
         latent_size_x_train_image = get_data_from_storage(x_train_images[0])
 
         latent_x_y_size = int(np.round(latent_size_x_train_image.shape[1] / np.power(2.0, len(filters) - 1.0)))
-        latent_shape = (latent_x_y_size, latent_x_y_size, filters[-1])
+        latent_shape = (latent_x_y_size, latent_x_y_size, latent_filters)
     else:
         latent_shape = None
 
@@ -2896,9 +2835,12 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
 
             for m in range(current_batch_size):
                 current_x_train_image = get_data_from_storage(x_train_images[indices[current_index]])
-
-                current_x_train_image = augmentation(current_x_train_image)
+                current_x_train_output_shape = x_train_output_shapes[indices[current_index]]
                 current_x_train_padding_mask = get_data_from_storage(x_train_padding_masks[indices[current_index]])
+
+                current_x_train_image = augmentation(current_x_train_image, current_x_train_output_shape,
+                                                     current_x_train_padding_mask)
+
                 current_x_train_label = x_train_labels[indices[current_index]]
 
                 current_x_train_image = tf.expand_dims(current_x_train_image, axis=0)
@@ -3077,7 +3019,7 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
                         errors_range.append(tf.constant(0.0))
                 else:
                     with tf.GradientTape() as tape:
-                        y_pred = model([current_x_train_image], training=True)
+                        y_pred, x_latent = model([current_x_train_image], training=True)
 
                         loss = tf.math.reduce_sum([mean_squared_error(current_x_train_image, y_pred,
                                                                       current_x_train_padding_mask),
@@ -3124,8 +3066,9 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
     return model
 
 
-def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_train_padding_masks, x_test_images,
-          x_test_original_shapes, x_test_padding_masks, standard_scaler, x_train_labels, x_test_labels):
+def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_train_output_shapes,
+          x_train_padding_masks, x_test_images, x_test_original_shapes, x_test_padding_masks, standard_scaler,
+          x_train_labels, x_test_labels):
     print("train")
 
     validate(model, x_test_images, x_test_original_shapes, x_test_padding_masks, standard_scaler, x_test_labels, 0)
@@ -3141,7 +3084,7 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_t
         latent_size_x_train_image = get_data_from_storage(x_train_images[0])
 
         latent_x_y_size = int(np.round(latent_size_x_train_image.shape[1] / np.power(2.0, len(filters) - 1.0)))
-        latent_shape = (latent_x_y_size, latent_x_y_size, filters[-1])
+        latent_shape = (latent_x_y_size, latent_x_y_size, latent_filters)
     else:
         latent_shape = None
 
@@ -3165,11 +3108,18 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_t
 
             for k in range(current_batch_size):
                 current_x_train_image = get_data_from_storage(x_train_images[indices[current_index]])
+                current_x_train_output_shape = x_train_output_shapes[indices[current_index]]
+                current_x_train_padding_mask = get_data_from_storage(x_train_padding_masks[indices[current_index]])
 
-                current_x_train_images.append(augmentation(current_x_train_image))
-                current_x_train_padding_masks.append(get_data_from_storage(
-                    x_train_padding_masks[indices[current_index]]))
-                current_x_train_labels.append(x_train_labels[indices[current_index]])
+                current_x_train_label = x_train_labels[indices[current_index]]
+
+                current_x_train_image = augmentation(current_x_train_image, current_x_train_output_shape,
+                                                     current_x_train_padding_mask)
+
+                current_x_train_images.append(current_x_train_image)
+                current_x_train_padding_masks.append(current_x_train_padding_mask)
+
+                current_x_train_labels.append(current_x_train_label)
 
                 current_index = current_index + 1
 
@@ -3350,7 +3300,7 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_t
                     error_range = tf.constant(0.0)
             else:
                 with tf.GradientTape() as tape:
-                    y_pred = model([current_x_train_images], training=True)
+                    y_pred, x_latent = model([current_x_train_images], training=True)
 
                     loss = tf.math.reduce_sum([mean_squared_error(current_x_train_images, y_pred,
                                                                   current_x_train_padding_masks),
@@ -3394,7 +3344,7 @@ def test(model, x_test_images, x_test_original_shapes, x_test_padding_masks, sta
         latent_size_x_test_image = get_data_from_storage(x_test_images[0])
 
         latent_x_y_size = int(np.round(latent_size_x_test_image.shape[1] / np.power(2.0, len(filters) - 1.0)))
-        latent_shape = (latent_x_y_size, latent_x_y_size, filters[-1])
+        latent_shape = (latent_x_y_size, latent_x_y_size, latent_filters)
     else:
         latent_shape = None
 
@@ -3522,7 +3472,7 @@ def test(model, x_test_images, x_test_original_shapes, x_test_padding_masks, sta
                     else:
                         y_pred, y_latent = (model([current_x_test_images, current_x_test_labels], training=False))
         else:
-            y_pred = model([current_x_test_images], training=False)
+            y_pred, x_latent = model([current_x_test_images], training=False)
 
         errors.append(get_error(current_x_test_images, y_pred, current_x_test_padding_masks))
 
@@ -3594,12 +3544,13 @@ def main():
 
     if gradient_accumulation_bool:
         model = train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images,
-                                            x_train_padding_masks, x_test_images, x_test_original_shapes,
-                                            x_test_padding_masks, standard_scaler, x_train_labels, x_test_labels)
+                                            x_train_original_shapes, x_train_padding_masks, x_test_images,
+                                            x_test_original_shapes, x_test_padding_masks, standard_scaler,
+                                            x_train_labels, x_test_labels)
     else:
-        model = train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_train_padding_masks,
-                      x_test_images, x_test_original_shapes, x_test_padding_masks, standard_scaler, x_train_labels,
-                      x_test_labels)
+        model = train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_train_original_shapes,
+                      x_train_padding_masks, x_test_images, x_test_original_shapes, x_test_padding_masks,
+                      standard_scaler, x_train_labels, x_test_labels)
 
     if use_ema and epochs > 0:
         optimiser.finalize_variable_values(model.trainable_variables)
