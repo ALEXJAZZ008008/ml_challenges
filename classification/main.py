@@ -18,7 +18,6 @@ import einops
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import tensorflow_models as tfm
-from standardiser import Standardiser
 import pickle
 
 
@@ -28,26 +27,26 @@ np.seterr(all="print")
 dataset_name = "mnist"
 output_path = "../output/classification/"
 
-read_data_from_storage_bool = False
+read_data_from_storage_bool = True
 
-preprocess_list_bool = False
-convert_rgb_to_greyscale_bool = False
-min_output_dimension_size = None
-max_output_dimension_size = None
+preprocess_list_bool = True
+greyscale_bool = True
+min_output_dimension_size = 32
+max_output_dimension_size = 256
 
 deep_bool = True
 conv_bool = True
 alex_bool = True
 dense_layers = 4
-filters = [64, 128, 256, 512, 1024]
-conv_layers = [2, 2, 2, 2, 2]
+filters = [32, 64, 128, 256, 512, 1024]
+conv_layers = [2, 2, 2, 2, 2, 2]
 num_heads = 4
 key_dim = 32
 
 if alex_bool:
     learning_rate = 1e-04
     weight_decay = 0.0
-    use_ema = True
+    use_ema = False
     ema_overwrite_frequency = None
 else:
     learning_rate = 1e-04
@@ -57,7 +56,7 @@ else:
 
 gradient_accumulation_bool = False
 
-epochs = 1
+epochs = 10
 
 if gradient_accumulation_bool:
     min_batch_size = 32
@@ -203,7 +202,7 @@ def get_next_geometric_value(value, base):
     if not power.is_integer():
         next_value = base * np.power(2.0, (np.ceil(power) - 1.0))
     else:
-        next_value = value
+        next_value = copy.deepcopy(value)
 
     return next_value
 
@@ -233,15 +232,17 @@ def rescale_images_list(images):
         if output_dimension_size > max_output_dimension_size:
             output_dimension_size = max_output_dimension_size
 
+    rescaled_images = []
+
     for i in range(images_len):
         image = get_data_from_storage(images[i])
 
         image = rescale(image, output_dimension_size / np.max(image.shape[:-1]), order=3, preserve_range=True,
                         channel_axis=-1)
 
-        images[i] = set_data_from_storage(image, images[i])
+        rescaled_images.append(set_data_from_storage(image, images[i]))
 
-    return images
+    return rescaled_images
 
 
 def normalise_images_list(x_train_images, x_test_images):
@@ -281,14 +282,20 @@ def normalise_images_list(x_train_images, x_test_images):
     return normalised_x_train_images, normalised_x_test_images, standard_scaler
 
 
-def pad_image(image, output_dimension_size):
+def pad_image(image, output_dimension_size, output_shape=None):
     padded_image = copy.deepcopy(image)
+
+    if output_shape is not None:
+        output_dimension_size = output_shape[0]
 
     while padded_image.shape[0] + 1 < output_dimension_size:
         padded_image = np.pad(padded_image, ((1, 1), (0, 0), (0, 0)))  # noqa
 
     if padded_image.shape[0] < output_dimension_size:
         padded_image = np.pad(padded_image, ((0, 1), (0, 0), (0, 0)))  # noqa
+
+    if output_shape is not None:
+        output_dimension_size = output_shape[1]
 
     while padded_image.shape[1] + 1 < output_dimension_size:
         padded_image = np.pad(padded_image, ((0, 0), (1, 1), (0, 0)))  # noqa
@@ -333,11 +340,11 @@ def pad_images_list(images, current_output_path):
         padded_images.append(set_data_from_storage(image, images[i]))
 
         if read_data_from_storage_bool:
-            images_split = images[i].strip().split('.')
-            padding_masks.append("{0}/{1}_padding_mask.{2}".format(current_output_path, images_split[2],
-                                                                   images_split[3]))
+            images_split = images[i].strip().split('/')[-1].split('.')
+            padding_masks.append("{0}/{1}_padding_mask.{2}".format(current_output_path, images_split[0],
+                                                                   images_split[1]))
 
-        padding_masks.append(set_data_from_storage(padding_mask, padding_masks[i]))
+        padding_masks[i] = set_data_from_storage(padding_mask, padding_masks[i])
 
     return padded_images, original_shapes, padding_masks
 
@@ -382,7 +389,14 @@ def preprocess_images_list(x_train_images, x_test_images):
         normalise_images_list(x_train_images_preprocessed, x_test_images_preprocessed))
 
     x_train_padding_masks_output_path = "{0}/x_train_padding_masks/".format(output_path)
-    x_test_padding_masks_output_path = "{0}/x_train_padding_masks/".format(output_path)
+
+    if read_data_from_storage_bool:
+        mkdir_p(x_train_padding_masks_output_path)
+
+    x_test_padding_masks_output_path = "{0}/x_test_padding_masks/".format(output_path)
+
+    if read_data_from_storage_bool:
+        mkdir_p(x_test_padding_masks_output_path)
 
     x_train_images_preprocessed, x_train_original_shapes, x_train_padding_masks = (
         pad_images_list(x_train_images_preprocessed, x_train_padding_masks_output_path))
@@ -438,20 +452,22 @@ def rescale_images_array(images):
         rescaled_images.append(rescale(images[i], output_dimension_size / max_dimension_size, order=3,
                                        preserve_range=True, channel_axis=-1))
 
-    images = np.array(rescaled_images)
+    rescaled_images = np.array(rescaled_images)
 
-    return images
+    return rescaled_images
 
 
-def normalise_images_array(x_train, x_test):
+def normalise_images_array(x_train_images, x_test_images):
     print("normalise_images")
 
     standard_scaler = StandardScaler()
 
-    x_train = np.reshape(standard_scaler.fit_transform(np.reshape(x_train, (-1, 1))), x_train.shape)
-    x_test = np.reshape(standard_scaler.transform(np.reshape(x_test, (-1, 1))), x_test.shape)
+    normalised_x_train_images = np.reshape(standard_scaler.fit_transform(np.reshape(x_train_images, (-1, 1))),
+                                           x_train_images.shape)
+    normalised_x_test_images = np.reshape(standard_scaler.transform(np.reshape(x_test_images, (-1, 1))),
+                                          x_test_images.shape)
 
-    return x_train, x_test
+    return normalised_x_train_images, normalised_x_test_images, standard_scaler
 
 
 def pad_images_array(images):
@@ -460,39 +476,65 @@ def pad_images_array(images):
     max_dimension_size = np.max(images.shape[1:-1])
     output_dimension_size = get_next_geometric_value(max_dimension_size, 2.0)
 
-    while images.shape[1] + 1 < output_dimension_size:
-        images = np.pad(images, ((0, 0), (1, 1), (0, 0), (0, 0)))  # noqa
+    padded_images = copy.deepcopy(images)
 
-    if images.shape[1] < output_dimension_size:
-        images = np.pad(images, ((0, 0), (0, 1), (0, 0), (0, 0)))  # noqa
+    while padded_images.shape[1] + 1 < output_dimension_size:
+        padded_images = np.pad(padded_images, ((0, 0), (1, 1), (0, 0), (0, 0)))  # noqa
 
-    while images.shape[2] + 1 < output_dimension_size:
-        images = np.pad(images, ((0, 0,), (0, 0), (1, 1), (0, 0)))  # noqa
+    if padded_images.shape[1] < output_dimension_size:
+        padded_images = np.pad(padded_images, ((0, 0), (0, 1), (0, 0), (0, 0)))  # noqa
 
-    if images.shape[2] < output_dimension_size:
-        images = np.pad(images, ((0, 0), (0, 0), (0, 1), (0, 0)))  # noqa
+    while padded_images.shape[2] + 1 < output_dimension_size:
+        padded_images = np.pad(padded_images, ((0, 0,), (0, 0), (1, 1), (0, 0)))  # noqa
 
-    return images
+    if padded_images.shape[2] < output_dimension_size:
+        padded_images = np.pad(padded_images, ((0, 0), (0, 0), (0, 1), (0, 0)))  # noqa
+
+    return padded_images
 
 
-def preprocess_images_array(x_train, x_test):
+def preprocess_images_array(x_train_images, x_test_images):
     print("preprocess_images")
 
-    x_train = np.array(x_train)
-    x_test = np.array(x_test)
+    x_train_images_preprocessed = np.array(x_train_images)
+    x_test_images_preprocessed = np.array(x_test_images)
 
-    x_train = rescale_images_array(x_train)
-    x_test = rescale_images_array(x_test)
+    x_train_images_preprocessed = rescale_images_array(x_train_images_preprocessed)
+    x_test_images_preprocessed = rescale_images_array(x_test_images_preprocessed)
 
-    x_train, x_test = normalise_images_array(x_train, x_test)
+    x_train_images_preprocessed, x_test_images_preprocessed, standard_scaler = (
+        normalise_images_array(x_train_images_preprocessed, x_test_images_preprocessed))
 
-    x_train = pad_images_array(x_train)
-    x_test = pad_images_array(x_test)
+    x_train_original_shapes = []
 
-    x_train = tf.convert_to_tensor(x_train)
-    x_test = tf.convert_to_tensor(x_test)
+    for i in range(x_train_images_preprocessed.shape[0]):
+        x_train_original_shapes.append(x_train_images_preprocessed.shape[1:])
 
-    return x_train, x_test
+    x_test_original_shapes = []
+
+    for i in range(x_test_images_preprocessed.shape[0]):
+        x_test_original_shapes.append(x_test_images_preprocessed.shape[1:])
+
+    x_train_padding_masks = np.ones(x_train_images_preprocessed.shape, dtype=np.float32)
+    x_test_padding_masks = np.ones(x_test_images_preprocessed.shape, dtype=np.float32)
+
+    x_train_images_preprocessed = pad_images_array(x_train_images_preprocessed)
+    x_test_images_preprocessed = pad_images_array(x_test_images_preprocessed)
+
+    x_train_padding_masks = pad_images_array(x_train_padding_masks)
+    x_test_padding_masks = pad_images_array(x_test_padding_masks)
+
+    x_train_images_preprocessed = tf.convert_to_tensor(x_train_images_preprocessed)
+    x_test_images_preprocessed = tf.convert_to_tensor(x_test_images_preprocessed)
+
+    x_train_padding_masks = x_train_padding_masks.astype(bool)
+    x_test_padding_masks = x_test_padding_masks.astype(bool)
+
+    x_train_padding_masks = tf.convert_to_tensor(x_train_padding_masks)
+    x_test_padding_masks = tf.convert_to_tensor(x_test_padding_masks)
+
+    return (x_train_images_preprocessed, x_train_original_shapes, x_train_padding_masks, x_test_images_preprocessed,
+            x_test_original_shapes, x_test_padding_masks, standard_scaler)
 
 
 def preprocess_labels(y_train, y_test):
@@ -500,32 +542,41 @@ def preprocess_labels(y_train, y_test):
 
     one_hot_encoder = OneHotEncoder(sparse_output=False)
 
-    y_train = np.reshape(one_hot_encoder.fit_transform(np.reshape(y_train, (-1, 1))),
-                         (y_train.shape[0], -1))
-    y_test = np.reshape(one_hot_encoder.transform(np.reshape(y_test, (-1, 1))),
-                        (y_test.shape[0], -1))
+    x_train_labels_preprocessed = np.reshape(one_hot_encoder.fit_transform(np.reshape(y_train, (-1, 1))),
+                                             (y_train.shape[0], -1))
+    x_test_labels_preprocessed = np.reshape(one_hot_encoder.transform(np.reshape(y_test, (-1, 1))),
+                                            (y_test.shape[0], -1))
 
-    y_train = tf.convert_to_tensor(y_train)
-    y_test = tf.convert_to_tensor(y_test)
+    x_train_labels_preprocessed = tf.convert_to_tensor(x_train_labels_preprocessed)
+    x_test_labels_preprocessed = tf.convert_to_tensor(x_test_labels_preprocessed)
 
-    return y_train, y_test
+    return x_train_labels_preprocessed, x_test_labels_preprocessed
 
 
-def preprocess_input(x_train, x_test, y_train, y_test):
+def preprocess_input(x_train_images, x_test_images, x_train_labels, x_test_labels):
     print("preprocess_input")
 
-    if convert_rgb_to_greyscale_bool:
-        x_train = convert_rgb_to_greyscale(x_train)
-        x_test = convert_rgb_to_greyscale(x_test)
+    x_train_images_preprocessed = copy.deepcopy(x_train_images)
+    x_test_images_preprocessed = copy.deepcopy(x_test_images)
+
+    if greyscale_bool:
+        x_train_images_preprocessed = convert_rgb_to_greyscale(x_train_images_preprocessed)
+        x_test_images_preprocessed = convert_rgb_to_greyscale(x_test_images_preprocessed)
 
     if read_data_from_storage_bool or preprocess_list_bool:
-        x_train, x_test = preprocess_images_list(x_train, x_test)
+        (x_train_images_preprocessed, x_train_original_shapes, x_train_padding_masks, x_test_images_preprocessed,
+         x_test_original_shapes, x_test_padding_masks, standard_scaler) = (
+            preprocess_images_list(x_train_images_preprocessed, x_test_images_preprocessed))
     else:
-        x_train, x_test = preprocess_images_array(x_train, x_test)
+        (x_train_images_preprocessed, x_train_original_shapes, x_train_padding_masks, x_test_images_preprocessed,
+         x_test_original_shapes, x_test_padding_masks, standard_scaler) = (
+            preprocess_images_array(x_train_images_preprocessed, x_test_images_preprocessed))
 
-    y_train, y_test = preprocess_labels(y_train, y_test)
+    x_train_labels_preprocessed, x_test_labels_preprocessed = preprocess_labels(x_train_labels, x_test_labels)
 
-    return x_train, x_test, y_train, y_test
+    return (x_train_images_preprocessed, x_train_original_shapes, x_train_padding_masks, x_test_images_preprocessed,
+            x_test_original_shapes, x_test_padding_masks, standard_scaler, x_train_labels_preprocessed,
+            x_test_labels_preprocessed)
 
 
 def get_model_dense(x_train, y_train):
@@ -556,13 +607,15 @@ def get_model_dense(x_train, y_train):
     return model
 
 
-def get_previous_geometric_value(an, a0):
-    n = np.log2(an / a0) + 1
+def get_previous_geometric_value(value, base):
+    power = np.log2(value / base) + 1
 
-    if not n.is_integer():
-        an = a0 * np.power(2.0, (np.floor(n) - 1.0))
+    if not power.is_integer():
+        previous_value = base * np.power(2.0, (np.floor(power) - 1.0))
+    else:
+        previous_value = copy.deepcopy(value)
 
-    return an
+    return previous_value
 
 
 def get_model_deep_dense(x_train, y_train):
@@ -723,6 +776,7 @@ def get_model_conv_alex(x_train, y_train):
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8)(x)
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
         x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -740,6 +794,11 @@ def get_model_conv_alex(x_train, y_train):
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b (h1 h2) (w1 w2) c -> b h1 w1 (c h2 w2)",
                                                                 "h2": 2,
                                                                 "w2": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(1, 1),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
     x_res = x
 
@@ -749,6 +808,7 @@ def get_model_conv_alex(x_train, y_train):
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8)(x)
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
         x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
@@ -761,7 +821,9 @@ def get_model_conv_alex(x_train, y_train):
     if num_heads is not None and key_dim is not None:
         x_res = x
 
-        x = Standardiser()(x)
+        x = tf.keras.layers.GroupNormalization(groups=1,
+                                               center=False,
+                                               scale=False)(x)
 
         x_shape = x.shape
         x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
@@ -778,23 +840,6 @@ def get_model_conv_alex(x_train, y_train):
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
         x = tf.keras.layers.Add()([x_res, x])
-
-        x_res = x
-
-        for j in range(conv_layers[-1]):
-            x = tf.keras.layers.Conv2D(filters=filters[-1],
-                                       kernel_size=(3, 3),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x)
-            x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
-
-        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                       kernel_size=(1, 1),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
-        x = tf.keras.layers.Add()([x, x_res])
 
     x = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                kernel_size=(3, 3),
@@ -821,7 +866,7 @@ def get_model_conv_alex(x_train, y_train):
     return model
 
 
-def sinespace(start, stop, num):
+def sinspace(start, stop, num):
     linspaced = np.linspace(0.0, 90.0, num)
 
     sinspaced = np.sin(np.deg2rad(linspaced))
@@ -833,20 +878,20 @@ def sinespace(start, stop, num):
     return sinspaced
 
 
-def get_batch_sizes(x_train):
+def get_batch_sizes(x_train_images):
     print("get_batch_sizes")
 
     current_min_batch_size = get_next_geometric_value(min_batch_size, 2.0)
 
-    x_train_len = len(x_train)
+    x_train_images_len = len(x_train_images)
 
     if max_batch_size is not None:
-        if max_batch_size < current_min_batch_size or max_batch_size > x_train_len:
-            current_max_batch_size = x_train_len
+        if max_batch_size < current_min_batch_size or max_batch_size > x_train_images_len:
+            current_max_batch_size = x_train_images_len
         else:
             current_max_batch_size = max_batch_size
     else:
-        current_max_batch_size = x_train_len
+        current_max_batch_size = x_train_images_len
 
     batch_sizes = [current_min_batch_size]
 
@@ -858,25 +903,27 @@ def get_batch_sizes(x_train):
         else:
             break
 
-    if current_max_batch_size >= x_train_len > batch_sizes[-1]:
-        batch_sizes.append(x_train_len)
+    if current_max_batch_size >= x_train_images_len > batch_sizes[-1]:
+        batch_sizes.append(x_train_images_len)
 
-    batch_sizes_epochs = sinespace(0.0, epochs - 1, len(batch_sizes) + 1)
+    batch_sizes_epochs = sinspace(0.0, epochs - 1, len(batch_sizes) + 1)
     batch_sizes_epochs = np.round(batch_sizes_epochs)
 
     return batch_sizes, batch_sizes_epochs
 
 
 def flip_image(image):
+    flipped_image = copy.deepcopy(image)
+
     if axis_zero_flip_bool:
         if random.choice([True, False]):
-            image = np.flip(image, axis=0)
+            flipped_image = np.flip(flipped_image, axis=0)
 
     if axis_one_flip_bool:
         if random.choice([True, False]):
-            image = np.flip(image, axis=1)
+            flipped_image = np.flip(flipped_image, axis=1)
 
-    return image
+    return flipped_image
 
 
 def translate_image(image):
@@ -885,66 +932,81 @@ def translate_image(image):
     translation = random.randint(0, max_translation)
 
     if random.choice([True, False]):
-        image = np.pad(image, ((0, translation), (0, 0), (0, 0)))  # noqa
+        translated_image = np.pad(image, ((0, translation), (0, 0), (0, 0)))  # noqa
     else:
-        image = np.pad(image, ((translation, 0), (0, 0), (0, 0)))  # noqa
+        translated_image = np.pad(image, ((translation, 0), (0, 0), (0, 0)))  # noqa
 
     translation = random.randint(0, max_translation)
 
     if random.choice([True, False]):
-        image = np.pad(image, ((0, 0), (0, translation), (0, 0)))  # noqa
+        translated_image = np.pad(translated_image, ((0, 0), (0, translation), (0, 0)))  # noqa
     else:
-        image = np.pad(image, ((0, 0), (translation, 0), (0, 0)))  # noqa
+        translated_image = np.pad(translated_image, ((0, 0), (translation, 0), (0, 0)))  # noqa
 
-    return image
-
-
-def crop_image(image, output_dimension_size):
-    while image.shape[0] - 1 > output_dimension_size:
-        image = image[1:-1]
-
-    if image.shape[0] > output_dimension_size:
-        image = image[1:]
-
-    while image.shape[1] - 1 > output_dimension_size:
-        image = image[:, 1:-1]
-
-    if image.shape[1] > output_dimension_size:
-        image = image[:, 1:]
-
-    return image
+    return translated_image
 
 
-def augmentation(image):
-    image = image.numpy()
+def crop_image(image, output_dimension_size, output_shape=None):
+    cropped_image = copy.deepcopy(image)
 
-    input_dimension_size = image.shape[0]
+    if output_shape is not None:
+        output_dimension_size = output_shape[0]
 
-    image = flip_image(image)
+    while cropped_image.shape[0] - 1 > output_dimension_size:
+        cropped_image = cropped_image[1:-1]
+
+    if cropped_image.shape[0] > output_dimension_size:
+        cropped_image = cropped_image[1:]
+
+    if output_shape is not None:
+        output_dimension_size = output_shape[1]
+
+    while cropped_image.shape[1] - 1 > output_dimension_size:
+        cropped_image = cropped_image[:, 1:-1]
+
+    if cropped_image.shape[1] > output_dimension_size:
+        cropped_image = cropped_image[:, 1:]
+
+    return cropped_image
+
+
+def augmentation(image, original_shape, padding_mask):
+    augmented_image = image.numpy()
+
+    input_shape = augmented_image.shape
+
+    augmented_image = augmented_image[padding_mask]
+    augmented_image = np.reshape(augmented_image, original_shape)
+
+    augmented_image = flip_image(augmented_image)
 
     if gaussian_bool:
-        image = gaussian(image, sigma=random.uniform(0.0, max_sigma), mode="constant", preserve_range=True,
-                         channel_axis=-1)
+        augmented_image = gaussian(augmented_image, sigma=random.uniform(0.0, max_sigma), mode="constant",
+                                   preserve_range=True, channel_axis=-1)
 
     if sharpen_bool:
-        image = unsharp_mask(image, radius=random.uniform(0.0, max_radius), amount=random.uniform(0.0, max_amount),
-                             preserve_range=True, channel_axis=1)
+        augmented_image = unsharp_mask(augmented_image, radius=random.uniform(0.0, max_radius),
+                                       amount=random.uniform(0.0, max_amount), preserve_range=True, channel_axis=1)
 
     if scale_bool:
-        image = rescale(image, random.uniform(min_scale, max_scale), order=3, preserve_range=True, channel_axis=-1)
+        augmented_image = rescale(augmented_image, random.uniform(min_scale, max_scale), order=3, preserve_range=True,
+                                  channel_axis=-1)
 
     if rotate_bool:
-        image = scipy.ndimage.rotate(image, angle=random.uniform(min_angle, max_angle), axes=(0, 1), order=1)
+        augmented_image = scipy.ndimage.rotate(augmented_image, angle=random.uniform(min_angle, max_angle), axes=(0, 1),
+                                               order=1)
 
     if translate_bool:
-        image = translate_image(image)
+        augmented_image = translate_image(augmented_image)
 
-    image = pad_image(image, input_dimension_size)
-    image = crop_image(image, input_dimension_size)
+    augmented_image = pad_image(augmented_image, None, original_shape)
+    augmented_image = crop_image(augmented_image, None, original_shape)
 
-    image = tf.convert_to_tensor(image)
+    augmented_image = pad_image(augmented_image, None, input_shape)
 
-    return image
+    augmented_image = tf.convert_to_tensor(augmented_image)
+
+    return augmented_image
 
 
 def get_loss(y_true, y_pred):
@@ -959,15 +1021,16 @@ def get_accuracy(y_true, y_pred):
     return accuracy
 
 
-def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epochs, x_train, y_train):
+def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images,
+                                x_train_original_shapes, x_train_padding_masks, x_train_labels):
     print("train")
 
-    y_train = tf.expand_dims(y_train, axis=1)
+    x_train_labels = tf.expand_dims(x_train_labels, axis=1)
 
-    x_train_len = len(x_train)
+    x_train_images_len = len(x_train_images)
 
     current_batch_size = None
-    indices = list(range(x_train_len))
+    indices = list(range(x_train_images_len))
 
     batch_sizes_epochs_len = len(batch_sizes_epochs)
 
@@ -978,7 +1041,7 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
 
                 break
 
-        iterations = int(np.floor(x_train_len / current_batch_size))
+        iterations = int(np.floor(x_train_images_len / current_batch_size))
 
         random.shuffle(indices)
 
@@ -992,17 +1055,21 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
             accuracies = []
 
             for m in range(current_batch_size):
-                current_x_train = get_data_from_storage(x_train[indices[current_index]])
+                current_x_train_images = get_data_from_storage(x_train_images[indices[current_index]])
+                current_x_train_original_shape = x_train_original_shapes[indices[current_index]]
+                current_x_train_padding_mask = get_data_from_storage(x_train_padding_masks[indices[current_index]])
 
-                current_x_train = augmentation(current_x_train)
-                y_true = y_train[indices[current_index]]
+                current_x_train_images = augmentation(current_x_train_images, current_x_train_original_shape,
+                                                      current_x_train_padding_mask)
 
-                current_x_train = tf.expand_dims(current_x_train, axis=0)
+                current_x_train_labels = x_train_labels[indices[current_index]]
+
+                current_x_train_images = tf.expand_dims(current_x_train_images, axis=0)
 
                 with tf.GradientTape() as tape:
-                    y_pred = model([current_x_train], training=True)
+                    y_pred = model([current_x_train_images], training=True)
 
-                    loss = tf.math.reduce_sum([get_loss(y_true, y_pred),
+                    loss = tf.math.reduce_sum([get_loss(current_x_train_labels, y_pred),
                                                tf.math.reduce_sum(model.losses)])
 
                 gradients = tape.gradient(loss, model.trainable_weights)
@@ -1011,7 +1078,7 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
                                          zip(accumulated_gradients, gradients)]
 
                 losses.append(loss)
-                accuracies.append(get_accuracy(y_true, y_pred))
+                accuracies.append(get_accuracy(current_x_train_labels, y_pred))
 
                 current_index = current_index + 1
 
@@ -1022,7 +1089,7 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
             loss = tf.math.reduce_mean(losses)
             accuracy = tf.math.reduce_mean(accuracies)
 
-            print("Epoch: {0:3}/{1:3} Batch size: {2:6} Iteration: {3:6}/{4:6} Loss: {5:14} Accuracy: {6:14}%".format(
+            print("Epoch: {0:3}/{1:3} Batch size: {2:6} Iteration: {3:6}/{4:6} Loss: {5:18} Accuracy: {6:18}%".format(
                 str(i + 1), str(epochs), str(current_batch_size), str(j + 1), str(iterations), str(loss.numpy()),
                 str(accuracy.numpy())))
 
@@ -1032,13 +1099,14 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
     return model
 
 
-def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train, y_train):
+def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_train_original_shapes,
+          x_train_padding_masks, x_train_labels):
     print("train")
 
-    x_train_len = len(x_train)
+    x_train_images_len = len(x_train_images)
 
     current_batch_size = None
-    indices = list(range(x_train_len))
+    indices = list(range(x_train_images_len))
 
     batch_sizes_epochs_len = len(batch_sizes_epochs)
 
@@ -1049,40 +1117,43 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train, y_train):
 
                 break
 
-        iterations = int(np.floor(x_train_len / current_batch_size))
+        iterations = int(np.floor(x_train_images_len / current_batch_size))
 
         random.shuffle(indices)
 
         for j in range(iterations):
             current_index = current_batch_size * j
 
-            current_x_train_list = []
-            y_true = []
+            current_x_train_images = []
+            current_x_train_labels = []
 
             for k in range(current_batch_size):
-                current_x_train = get_data_from_storage(x_train[indices[current_index]])
+                current_x_train_image = get_data_from_storage(x_train_images[indices[current_index]])
+                current_x_train_original_shape = x_train_original_shapes[indices[current_index]]
+                current_x_train_padding_mask = get_data_from_storage(x_train_padding_masks[indices[current_index]])
 
-                current_x_train_list.append(augmentation(current_x_train))
-                y_true.append(y_train[indices[current_index]])
+                current_x_train_images.append(augmentation(current_x_train_image, current_x_train_original_shape,
+                                                           current_x_train_padding_mask))
+                current_x_train_labels.append(x_train_labels[indices[current_index]])
 
                 current_index = current_index + 1
 
-            current_x_train_list = tf.convert_to_tensor(current_x_train_list)
-            y_true = tf.convert_to_tensor(y_true)
+            current_x_train_images = tf.convert_to_tensor(current_x_train_images)
+            current_x_train_labels = tf.convert_to_tensor(current_x_train_labels)
 
             with tf.GradientTape() as tape:
-                y_pred = model([current_x_train_list], training=True)
+                y_pred = model([current_x_train_images], training=True)
 
-                loss = tf.math.reduce_sum([get_loss(y_true, y_pred),
+                loss = tf.math.reduce_sum([get_loss(current_x_train_labels, y_pred),
                                            tf.math.reduce_sum(model.losses)])
 
             gradients = tape.gradient(loss, model.trainable_weights)
             gradients, _ = tf.clip_by_global_norm(gradients, 1.0)
             optimiser.apply_gradients(zip(gradients, model.trainable_weights))
 
-            accuracy = get_accuracy(y_true, y_pred)
+            accuracy = get_accuracy(current_x_train_labels, y_pred)
 
-            print("Epoch: {0:3}/{1:3} Batch size: {2:6} Iteration: {3:6}/{4:6} Loss: {5:14} Accuracy: {6:14}%".format(
+            print("Epoch: {0:3}/{1:3} Batch size: {2:6} Iteration: {3:6}/{4:6} Loss: {5:18} Accuracy: {6:18}%".format(
                 str(i + 1), str(epochs), str(current_batch_size), str(j + 1), str(iterations), str(loss.numpy()),
                 str(accuracy.numpy())))
 
@@ -1092,30 +1163,30 @@ def train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train, y_train):
     return model
 
 
-def test(model, x_test, y_test):
+def test(model, x_test_images, x_test_labels):
     print("test")
 
     losses = []
     accuracies = []
 
-    x_test_len = len(x_test)
+    x_test_images_len = len(x_test_images)
 
-    for i in range(int(np.floor(x_test_len / test_batch_size))):
-        current_x_test_list = []
+    for i in range(int(np.floor(x_test_images_len / test_batch_size))):
+        current_x_test_images = []
         y_true = []
 
         for j in range(test_batch_size):
             current_index = (i * test_batch_size) + j
 
-            current_x_test = get_data_from_storage(x_test[current_index])
+            current_x_test_image = get_data_from_storage(x_test_images[current_index])
 
-            current_x_test_list.append(current_x_test)
-            y_true.append(y_test[current_index])
+            current_x_test_images.append(current_x_test_image)
+            y_true.append(x_test_labels[current_index])
 
-        current_x_test_list = tf.convert_to_tensor(current_x_test_list)
+        current_x_test_images = tf.convert_to_tensor(current_x_test_images)
         y_true = tf.convert_to_tensor(y_true)
 
-        y_pred = model([current_x_test_list], training=True)
+        y_pred = model([current_x_test_images], training=True)
 
         losses.append(get_loss(y_true, y_pred))
         accuracies.append(get_accuracy(y_true, y_pred))
@@ -1123,7 +1194,7 @@ def test(model, x_test, y_test):
     loss = tf.math.reduce_mean(losses)
     accuracy = tf.math.reduce_mean(accuracies)
 
-    print("Loss: {0:14} Accuracy: {1:14}%".format(str(loss.numpy()), str(accuracy.numpy())))
+    print("Loss: {0:18} Accuracy: {1:18}%".format(str(loss.numpy()), str(accuracy.numpy())))
 
     return model
 
@@ -1137,22 +1208,24 @@ def main():
     if read_data_from_storage_bool:
         mkdir_p(output_path)
 
-    x_train, x_test, y_train, y_test = get_input()
-    x_train, x_test, y_train, y_test = preprocess_input(x_train, x_test, y_train, y_test)
+    x_train_images, x_test_images, x_train_labels, x_test_labels = get_input()
+    (x_train_images, x_train_original_shapes, x_train_padding_masks, x_test_images, x_test_original_shapes,
+     x_test_padding_masks, standard_scaler, x_train_labels, x_test_labels) = (
+        preprocess_input(x_train_images, x_test_images, x_train_labels, x_test_labels))
 
     if conv_bool:
         if alex_bool:
-            model = get_model_conv_alex(x_train, y_train)
+            model = get_model_conv_alex(x_train_images, x_train_labels)
         else:
             if deep_bool:
-                model = get_model_deep_conv(x_train, y_train)
+                model = get_model_deep_conv(x_train_images, x_train_labels)
             else:
-                model = get_model_conv(x_train, y_train)
+                model = get_model_conv(x_train_images, x_train_labels)
     else:
         if deep_bool:
-            model = get_model_deep_dense(x_train, y_train)
+            model = get_model_deep_dense(x_train_images, x_train_labels)
         else:
-            model = get_model_dense(x_train, y_train)
+            model = get_model_dense(x_train_images, x_train_labels)
 
     model.summary()
 
@@ -1161,17 +1234,19 @@ def main():
                                          use_ema=use_ema,
                                          ema_overwrite_frequency=ema_overwrite_frequency)
 
-    batch_sizes, batch_sizes_epochs = get_batch_sizes(x_train)
+    batch_sizes, batch_sizes_epochs = get_batch_sizes(x_train_images)
 
     if gradient_accumulation_bool:
-        model = train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epochs, x_train, y_train)
+        model = train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images,
+                                            x_train_original_shapes, x_train_padding_masks, x_train_labels)
     else:
-        model = train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train, y_train)
+        model = train(model, optimiser, batch_sizes, batch_sizes_epochs, x_train_images, x_train_original_shapes,
+                      x_train_padding_masks, x_train_labels)
 
     if use_ema and epochs > 0:
         optimiser.finalize_variable_values(model.trainable_variables)
 
-    test(model, x_test, y_test)
+    test(model, x_test_images, x_test_labels)
 
     return True
 
