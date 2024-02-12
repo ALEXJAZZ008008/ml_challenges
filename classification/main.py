@@ -69,6 +69,7 @@ else:
         min_batch_size = 32
         max_batch_size = 32
 
+augmentation_bool = False
 axis_zero_flip_bool = False
 axis_one_flip_bool = False
 gaussian_bool = True
@@ -678,7 +679,7 @@ def get_model_deep_conv(x_train, y_train):
                                    padding="same")(x)
         x = tf.keras.layers.Lambda(tf.keras.activations.relu)(x)
 
-    for j in range(conv_layers[-1]):
+    for i in range(conv_layers[-1]):
         x = tf.keras.layers.Conv2D(filters=filters[-1],
                                    kernel_size=(3, 3),
                                    strides=(1, 1),
@@ -727,7 +728,7 @@ def get_model_conv(x_train, y_train):
                                    padding="same")(x)
         x = tf.keras.layers.Lambda(tf.keras.activations.relu)(x)
 
-    for j in range(conv_layers[-1]):
+    for i in range(conv_layers[-1]):
         x = tf.keras.layers.Conv2D(filters=filters[-1],
                                    kernel_size=(3, 3),
                                    strides=(1, 1),
@@ -786,19 +787,9 @@ def get_model_conv_alex(x_train, y_train):
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
         x = tf.keras.layers.Add()([x, x_res])
 
-        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                   kernel_size=(3, 3),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b (h1 h2) (w1 w2) c -> b h1 w1 (c h2 w2)",
                                                                 "h2": 2,
                                                                 "w2": 2})(x)
-        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
     x_res = x
 
@@ -927,7 +918,7 @@ def flip_image(image):
 
 
 def translate_image(image):
-    max_translation = int(np.round(image.shape[0] * translate_proportion))
+    max_translation = int(np.round(np.min(image.shape) * translate_proportion))
 
     translation = random.randint(0, max_translation)
 
@@ -973,36 +964,37 @@ def crop_image(image, output_dimension_size, output_shape=None):
 def augmentation(image, original_shape, padding_mask):
     augmented_image = image.numpy()
 
-    input_shape = augmented_image.shape
+    if augmentation_bool:
+        input_shape = augmented_image.shape
 
-    augmented_image = augmented_image[padding_mask]
-    augmented_image = np.reshape(augmented_image, original_shape)
+        augmented_image = augmented_image[padding_mask]
+        augmented_image = np.reshape(augmented_image, original_shape)
 
-    augmented_image = flip_image(augmented_image)
+        augmented_image = flip_image(augmented_image)
 
-    if gaussian_bool:
-        augmented_image = gaussian(augmented_image, sigma=random.uniform(0.0, max_sigma), mode="constant",
-                                   preserve_range=True, channel_axis=-1)
+        if gaussian_bool:
+            augmented_image = gaussian(augmented_image, sigma=random.uniform(0.0, max_sigma), mode="constant",
+                                       preserve_range=True, channel_axis=-1)
 
-    if sharpen_bool:
-        augmented_image = unsharp_mask(augmented_image, radius=random.uniform(0.0, max_radius),
-                                       amount=random.uniform(0.0, max_amount), preserve_range=True, channel_axis=1)
+        if sharpen_bool:
+            augmented_image = unsharp_mask(augmented_image, radius=random.uniform(0.0, max_radius),
+                                           amount=random.uniform(0.0, max_amount), preserve_range=True, channel_axis=-1)
 
-    if scale_bool:
-        augmented_image = rescale(augmented_image, random.uniform(min_scale, max_scale), order=3, preserve_range=True,
-                                  channel_axis=-1)
+        if scale_bool:
+            augmented_image = rescale(augmented_image, random.uniform(min_scale, max_scale), order=3, preserve_range=True,
+                                      channel_axis=-1)
 
-    if rotate_bool:
-        augmented_image = scipy.ndimage.rotate(augmented_image, angle=random.uniform(min_angle, max_angle), axes=(0, 1),
-                                               order=1)
+        if rotate_bool:
+            augmented_image = scipy.ndimage.rotate(augmented_image, angle=random.uniform(min_angle, max_angle), axes=(0, 1),
+                                                   order=1)
 
-    if translate_bool:
-        augmented_image = translate_image(augmented_image)
+        if translate_bool:
+            augmented_image = translate_image(augmented_image)
 
-    augmented_image = pad_image(augmented_image, None, original_shape)
-    augmented_image = crop_image(augmented_image, None, original_shape)
+        augmented_image = pad_image(augmented_image, None, original_shape)
+        augmented_image = crop_image(augmented_image, None, original_shape)
 
-    augmented_image = pad_image(augmented_image, None, input_shape)
+        augmented_image = pad_image(augmented_image, None, input_shape)
 
     augmented_image = tf.convert_to_tensor(augmented_image)
 

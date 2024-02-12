@@ -7,7 +7,7 @@ import einops
 import tensorflow as tf
 
 
-commitment_loss_weight = 1.0
+commitment_loss_weight = 0.25
 
 
 # https://keras.io/examples/generative/vq_vae/
