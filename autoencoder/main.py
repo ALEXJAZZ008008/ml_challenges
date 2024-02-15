@@ -26,20 +26,20 @@ from PIL import Image
 np.seterr(all="print")
 
 
-dataset_name = "cifar10"
+dataset_name = "imagenette"
 output_path = "../output/autoencoder/"
 
-read_data_from_storage_bool = False
+read_data_from_storage_bool = True
 
-preprocess_list_bool = False
+preprocess_list_bool = True
 greyscale_bool = True
-min_output_dimension_size = 32
+min_output_dimension_size = 256
 max_output_dimension_size = 256
 
 deep_bool = True
 conv_bool = True
 alex_bool = True
-gaussian_latent_bool = True
+gaussian_latent_bool = False
 discrete_bool = False
 gaussian_negative_log_likelihood_bool = False
 
@@ -77,7 +77,7 @@ else:
     use_ema = False
     ema_overwrite_frequency = None
 
-gradient_accumulation_bool = False
+gradient_accumulation_bool = True
 
 epochs = 256
 
@@ -156,8 +156,8 @@ def get_input():
     dataset = tfds.load(dataset_name)
 
     dataset_train = dataset["train"]
-    dataset_test = dataset["test"]
-    # dataset_test = dataset["validation"]
+    # dataset_test = dataset["test"]
+    dataset_test = dataset["validation"]
 
     x_train_images = []
     x_test_images = []
@@ -859,6 +859,11 @@ def get_model_conv_alex(x_train_images, x_train_labels):
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b (h1 h2) (w1 w2) c -> b h1 w1 (c h2 w2)",
                                                                 "h2": 2,
                                                                 "w2": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
     x_res = x
 
@@ -972,6 +977,11 @@ def get_model_conv_alex(x_train_images, x_train_labels):
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
                                                                 "c2": 2,
                                                                 "c3": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
         x_res = x
 
@@ -1039,6 +1049,7 @@ def get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels):
 
     latent_hw_size = int(np.round(image_input_shape[0] / np.power(2.0, len(filters) - 1.0)))
     latent_shape = (latent_hw_size, latent_hw_size, latent_filters)
+    latent_shape_prod = np.prod(latent_shape)
 
     x_latent_gaussian_input = tf.keras.Input(shape=latent_shape)
 
@@ -1105,6 +1116,11 @@ def get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels):
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b (h1 h2) (w1 w2) c -> b h1 w1 (c h2 w2)",
                                                                 "h2": 2,
                                                                 "w2": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
     x_res = x
 
@@ -1208,11 +1224,10 @@ def get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels):
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
     x_latent_mean = tf.keras.layers.Add()([x_latent_mean, x_res])
 
-    x_latent_mean = tf.keras.layers.Conv2D(filters=latent_filters,
-                                           kernel_size=(1, 1),
-                                           strides=(1, 1),
-                                           padding="same",
-                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_latent_mean)
+    x_latent_mean = tf.keras.layers.Flatten()(x_latent_mean)
+    x_latent_mean = tf.keras.layers.Dense(units=latent_shape_prod,
+                                          kernel_initializer=tf.keras.initializers.orthogonal)(x_latent_mean)
+    x_latent_mean = tf.keras.layers.Reshape(target_shape=latent_shape)(x_latent_mean)
 
     x_latent_stddev = x
     x_res = x
@@ -1254,11 +1269,10 @@ def get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels):
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
     x_latent_stddev = tf.keras.layers.Add()([x_latent_stddev, x_res])
 
-    x_latent_stddev = tf.keras.layers.Conv2D(filters=latent_filters,
-                                             kernel_size=(1, 1),
-                                             strides=(1, 1),
-                                             padding="same",
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_latent_stddev)
+    x_latent_stddev = tf.keras.layers.Flatten()(x_latent_stddev)
+    x_latent_stddev = tf.keras.layers.Dense(units=latent_shape_prod,
+                                            kernel_initializer=tf.keras.initializers.orthogonal)(x_latent_stddev)
+    x_latent_stddev = tf.keras.layers.Reshape(target_shape=latent_shape)(x_latent_stddev)
     x_latent_stddev = tf.keras.layers.Lambda(tf.keras.activations.softplus)(x_latent_stddev)
     x_latent_stddev = tf.keras.layers.Lambda(lambda x_current: x_current + tf.keras.backend.epsilon())(x_latent_stddev)
 
@@ -1308,6 +1322,11 @@ def get_model_conv_alex_gaussian_latent(x_train_images, x_train_labels):
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
                                                                 "c2": 2,
                                                                 "c3": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
         x_res = x
 
@@ -1436,6 +1455,11 @@ def get_model_conv_alex_discrete(x_train_images, x_train_labels):
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b (h1 h2) (w1 w2) c -> b h1 w1 (c h2 w2)",
                                                                 "h2": 2,
                                                                 "w2": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
     x_res = x
 
@@ -1553,6 +1577,11 @@ def get_model_conv_alex_discrete(x_train_images, x_train_labels):
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
                                                                 "c2": 2,
                                                                 "c3": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
         x_res = x
 
@@ -1681,6 +1710,11 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b (h1 h2) (w1 w2) c -> b h1 w1 (c h2 w2)",
                                                                 "h2": 2,
                                                                 "w2": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
     x_res = x
 
@@ -1794,6 +1828,11 @@ def get_model_conv_alex_gaussian_negative_log_likelihood(x_train_images, x_train
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
                                                                 "c2": 2,
                                                                 "c3": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
         x_res = x
 
@@ -2015,6 +2054,11 @@ def get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b (h1 h2) (w1 w2) c -> b h1 w1 (c h2 w2)",
                                                                 "h2": 2,
                                                                 "w2": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
     x_res = x
 
@@ -2118,11 +2162,10 @@ def get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
     x_latent_mean = tf.keras.layers.Add()([x_latent_mean, x_res])
 
-    x_latent_mean = tf.keras.layers.Conv2D(filters=latent_filters,
-                                           kernel_size=(1, 1),
-                                           strides=(1, 1),
-                                           padding="same",
-                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_latent_mean)
+    x_latent_mean = tf.keras.layers.Flatten()(x_latent_mean)
+    x_latent_mean = tf.keras.layers.Dense(units=x_latent_mean,
+                                          kernel_initializer=tf.keras.initializers.orthogonal)(x_latent_mean)
+    x_latent_mean = tf.keras.layers.Reshape(target_shape=latent_shape)(x_latent_mean)
 
     x_latent_stddev = x
     x_res = x
@@ -2164,11 +2207,10 @@ def get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
     x_latent_stddev = tf.keras.layers.Add()([x_latent_stddev, x_res])
 
-    x_latent_stddev = tf.keras.layers.Conv2D(filters=latent_filters,
-                                             kernel_size=(1, 1),
-                                             strides=(1, 1),
-                                             padding="same",
-                                             kernel_initializer=tf.keras.initializers.orthogonal)(x_latent_stddev)
+    x_latent_mean = tf.keras.layers.Flatten()(x_latent_mean)
+    x_latent_mean = tf.keras.layers.Dense(units=x_latent_mean,
+                                          kernel_initializer=tf.keras.initializers.orthogonal)(x_latent_mean)
+    x_latent_mean = tf.keras.layers.Reshape(target_shape=latent_shape)(x_latent_mean)
     x_latent_stddev = tf.keras.layers.Lambda(tf.keras.activations.softplus)(x_latent_stddev)
     x_latent_stddev = tf.keras.layers.Lambda(lambda x_current: x_current + tf.keras.backend.epsilon())(x_latent_stddev)
 
@@ -2218,6 +2260,11 @@ def get_model_conv_alex_gaussian_latent_gaussian_negative_log_likelihood(x_train
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
                                                                 "c2": 2,
                                                                 "c3": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
         x_res = x
 
@@ -2434,6 +2481,11 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b (h1 h2) (w1 w2) c -> b h1 w1 (c h2 w2)",
                                                                 "h2": 2,
                                                                 "w2": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
     x_res = x
 
@@ -2551,6 +2603,11 @@ def get_model_conv_alex_discrete_gaussian_negative_log_likelihood(x_train_images
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b h w (c1 c2 c3) -> b (h c2) (w c3) c1",
                                                                 "c2": 2,
                                                                 "c3": 2})(x)
+        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                   kernel_size=(3, 3),
+                                   strides=(1, 1),
+                                   padding="same",
+                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
 
         x_res = x
 
@@ -2812,15 +2869,16 @@ def augmentation(image, original_shape, padding_mask):
 
         if sharpen_bool:
             augmented_image = unsharp_mask(augmented_image, radius=random.uniform(0.0, max_radius),
-                                           amount=random.uniform(0.0, max_amount), preserve_range=True, channel_axis=-1)
+                                           amount=random.uniform(0.0, max_amount), preserve_range=True,
+                                           channel_axis=-1)
 
         if scale_bool:
-            augmented_image = rescale(augmented_image, random.uniform(min_scale, max_scale), order=3, preserve_range=True,
-                                      channel_axis=-1)
+            augmented_image = rescale(augmented_image, random.uniform(min_scale, max_scale), order=3,
+                                      preserve_range=True, channel_axis=-1)
 
         if rotate_bool:
-            augmented_image = scipy.ndimage.rotate(augmented_image, angle=random.uniform(min_angle, max_angle), axes=(0, 1),
-                                                   order=1)
+            augmented_image = scipy.ndimage.rotate(augmented_image, angle=random.uniform(min_angle, max_angle),
+                                                   axes=(0, 1), order=1)
 
         if translate_bool:
             augmented_image = translate_image(augmented_image)
