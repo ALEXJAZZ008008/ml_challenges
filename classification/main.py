@@ -24,15 +24,14 @@ import pickle
 np.seterr(all="print")
 
 
-dataset_name = "mnist"
+dataset_name = "cifar10"
 output_path = "../output/classification/"
 
-read_data_from_storage_bool = True
+read_data_from_storage_bool = False
 
-preprocess_list_bool = True
+preprocess_list_bool = False
 greyscale_bool = True
-min_output_dimension_size = 32
-max_output_dimension_size = 256
+output_dimension_size = 32
 
 deep_bool = True
 conv_bool = True
@@ -59,6 +58,8 @@ gradient_accumulation_bool = False
 epochs = 10
 
 if gradient_accumulation_bool:
+    gradient_accumulation_batch_size = 1
+
     min_batch_size = 32
     max_batch_size = 32
 else:
@@ -208,37 +209,15 @@ def get_next_geometric_value(value, base):
     return next_value
 
 
-def rescale_images_list(images):
+def rescale_images_list(images, rescaled_dimension_size):
     print("rescale_images")
-
-    max_dimension_size = -1
-
-    images_len = len(images)
-
-    for i in range(images_len):
-        image = get_data_from_storage(images[i])
-
-        current_max_dimension_size = np.max(image.shape[:-1])
-
-        if current_max_dimension_size > max_dimension_size:
-            max_dimension_size = current_max_dimension_size
-
-    output_dimension_size = get_next_geometric_value(max_dimension_size, 2.0)
-
-    if min_output_dimension_size is not None:
-        if output_dimension_size < min_output_dimension_size:
-            output_dimension_size = min_output_dimension_size
-
-    if max_output_dimension_size is not None:
-        if output_dimension_size > max_output_dimension_size:
-            output_dimension_size = max_output_dimension_size
 
     rescaled_images = []
 
-    for i in range(images_len):
+    for i in range(len(images)):
         image = get_data_from_storage(images[i])
 
-        image = rescale(image, output_dimension_size / np.max(image.shape[:-1]), order=3, preserve_range=True,
+        image = rescale(image, rescaled_dimension_size / np.max(image.shape[:-1]), order=3, preserve_range=True,
                         channel_axis=-1)
 
         rescaled_images.append(set_data_from_storage(image, images[i]))
@@ -283,60 +262,46 @@ def normalise_images_list(x_train_images, x_test_images):
     return normalised_x_train_images, normalised_x_test_images, standard_scaler
 
 
-def pad_image(image, output_dimension_size, output_shape=None):
+def pad_image(image, padded_dimension_size, output_shape=None):
     padded_image = copy.deepcopy(image)
 
     if output_shape is not None:
-        output_dimension_size = output_shape[0]
+        padded_dimension_size = output_shape[0]
 
-    while padded_image.shape[0] + 1 < output_dimension_size:
-        padded_image = np.pad(padded_image, ((1, 1), (0, 0), (0, 0)))  # noqa
+    while padded_image.shape[0] + 1 < padded_dimension_size:
+        padded_image = np.pad(padded_image, ((1, 1), (0, 0), (0, 0)))
 
-    if padded_image.shape[0] < output_dimension_size:
-        padded_image = np.pad(padded_image, ((0, 1), (0, 0), (0, 0)))  # noqa
+    if padded_image.shape[0] < padded_dimension_size:
+        padded_image = np.pad(padded_image, ((0, 1), (0, 0), (0, 0)))
 
     if output_shape is not None:
-        output_dimension_size = output_shape[1]
+        padded_dimension_size = output_shape[1]
 
-    while padded_image.shape[1] + 1 < output_dimension_size:
-        padded_image = np.pad(padded_image, ((0, 0), (1, 1), (0, 0)))  # noqa
+    while padded_image.shape[1] + 1 < padded_dimension_size:
+        padded_image = np.pad(padded_image, ((0, 0), (1, 1), (0, 0)))
 
-    if padded_image.shape[1] < output_dimension_size:
-        padded_image = np.pad(padded_image, ((0, 0), (0, 1), (0, 0)))  # noqa
+    if padded_image.shape[1] < padded_dimension_size:
+        padded_image = np.pad(padded_image, ((0, 0), (0, 1), (0, 0)))
 
     return padded_image
 
 
-def pad_images_list(images, current_output_path):
+def pad_images_list(images, padded_dimension_size, current_output_path):
     print("pad_images")
-
-    max_dimension_size = -1
-
-    images_len = len(images)
-
-    for i in range(images_len):
-        image = get_data_from_storage(images[i])
-
-        current_max_dimension_size = np.max(image.shape[:-1])
-
-        if current_max_dimension_size > max_dimension_size:
-            max_dimension_size = current_max_dimension_size
-
-    output_dimension_size = get_next_geometric_value(max_dimension_size, 2.0)
 
     padded_images = []
     original_shapes = []
     padding_masks = []
 
-    for i in range(images_len):
+    for i in range(len(images)):
         image = get_data_from_storage(images[i])
 
         padding_mask = np.ones(image.shape, dtype=np.float32)
 
         original_shapes.append(image.shape)
-        image = pad_image(image, output_dimension_size)
+        image = pad_image(image, padded_dimension_size)
 
-        padding_mask = pad_image(padding_mask, output_dimension_size)
+        padding_mask = pad_image(padding_mask, padded_dimension_size)
 
         padded_images.append(set_data_from_storage(image, images[i]))
 
@@ -383,8 +348,8 @@ def convert_images_to_tensor_list(images):
 def preprocess_images_list(x_train_images, x_test_images):
     print("preprocess_images")
 
-    x_train_images_preprocessed = rescale_images_list(x_train_images)
-    x_test_images_preprocessed = rescale_images_list(x_test_images)
+    x_train_images_preprocessed = rescale_images_list(x_train_images, output_dimension_size)
+    x_test_images_preprocessed = rescale_images_list(x_test_images, output_dimension_size)
 
     x_train_images_preprocessed, x_test_images_preprocessed, standard_scaler = (
         normalise_images_list(x_train_images_preprocessed, x_test_images_preprocessed))
@@ -400,9 +365,9 @@ def preprocess_images_list(x_train_images, x_test_images):
         mkdir_p(x_test_padding_masks_output_path)
 
     x_train_images_preprocessed, x_train_original_shapes, x_train_padding_masks = (
-        pad_images_list(x_train_images_preprocessed, x_train_padding_masks_output_path))
+        pad_images_list(x_train_images_preprocessed, output_dimension_size, x_train_padding_masks_output_path))
     x_test_images_preprocessed, x_test_original_shapes, x_test_padding_masks = (
-        pad_images_list(x_test_images_preprocessed, x_test_padding_masks_output_path))
+        pad_images_list(x_test_images_preprocessed, output_dimension_size, x_test_padding_masks_output_path))
 
     if read_data_from_storage_bool:
         x_train_images_preprocessed = convert_images_to_tensor_list(x_train_images_preprocessed)
@@ -433,24 +398,13 @@ def preprocess_images_list(x_train_images, x_test_images):
             x_test_original_shapes, x_test_padding_masks, standard_scaler)
 
 
-def rescale_images_array(images):
+def rescale_images_array(images, rescaled_dimension_size):
     print("rescale_images")
-
-    max_dimension_size = np.max(images.shape[1:-1])
-    output_dimension_size = get_next_geometric_value(max_dimension_size, 2.0)
-
-    if min_output_dimension_size is not None:
-        if output_dimension_size < min_output_dimension_size:
-            output_dimension_size = min_output_dimension_size
-
-    if max_output_dimension_size is not None:
-        if output_dimension_size > max_output_dimension_size:  # noqa
-            output_dimension_size = max_output_dimension_size
 
     rescaled_images = []
 
     for i in range(len(images)):
-        rescaled_images.append(rescale(images[i], output_dimension_size / max_dimension_size, order=3,
+        rescaled_images.append(rescale(images[i], rescaled_dimension_size / np.max(images[i].shape[:-1]), order=3,
                                        preserve_range=True, channel_axis=-1))
 
     rescaled_images = np.array(rescaled_images)
@@ -471,25 +425,22 @@ def normalise_images_array(x_train_images, x_test_images):
     return normalised_x_train_images, normalised_x_test_images, standard_scaler
 
 
-def pad_images_array(images):
+def pad_images_array(images, padded_dimension_size):
     print("pad_images")
-
-    max_dimension_size = np.max(images.shape[1:-1])
-    output_dimension_size = get_next_geometric_value(max_dimension_size, 2.0)
 
     padded_images = copy.deepcopy(images)
 
-    while padded_images.shape[1] + 1 < output_dimension_size:
-        padded_images = np.pad(padded_images, ((0, 0), (1, 1), (0, 0), (0, 0)))  # noqa
+    while padded_images.shape[1] + 1 < padded_dimension_size:
+        padded_images = np.pad(padded_images, ((0, 0), (1, 1), (0, 0), (0, 0)))
 
-    if padded_images.shape[1] < output_dimension_size:
-        padded_images = np.pad(padded_images, ((0, 0), (0, 1), (0, 0), (0, 0)))  # noqa
+    if padded_images.shape[1] < padded_dimension_size:
+        padded_images = np.pad(padded_images, ((0, 0), (0, 1), (0, 0), (0, 0)))
 
-    while padded_images.shape[2] + 1 < output_dimension_size:
-        padded_images = np.pad(padded_images, ((0, 0,), (0, 0), (1, 1), (0, 0)))  # noqa
+    while padded_images.shape[2] + 1 < padded_dimension_size:
+        padded_images = np.pad(padded_images, ((0, 0,), (0, 0), (1, 1), (0, 0)))
 
-    if padded_images.shape[2] < output_dimension_size:
-        padded_images = np.pad(padded_images, ((0, 0), (0, 0), (0, 1), (0, 0)))  # noqa
+    if padded_images.shape[2] < padded_dimension_size:
+        padded_images = np.pad(padded_images, ((0, 0), (0, 0), (0, 1), (0, 0)))
 
     return padded_images
 
@@ -500,8 +451,8 @@ def preprocess_images_array(x_train_images, x_test_images):
     x_train_images_preprocessed = np.array(x_train_images)
     x_test_images_preprocessed = np.array(x_test_images)
 
-    x_train_images_preprocessed = rescale_images_array(x_train_images_preprocessed)
-    x_test_images_preprocessed = rescale_images_array(x_test_images_preprocessed)
+    x_train_images_preprocessed = rescale_images_array(x_train_images_preprocessed, output_dimension_size)
+    x_test_images_preprocessed = rescale_images_array(x_test_images_preprocessed, output_dimension_size)
 
     x_train_images_preprocessed, x_test_images_preprocessed, standard_scaler = (
         normalise_images_array(x_train_images_preprocessed, x_test_images_preprocessed))
@@ -519,11 +470,11 @@ def preprocess_images_array(x_train_images, x_test_images):
     x_train_padding_masks = np.ones(x_train_images_preprocessed.shape, dtype=np.float32)
     x_test_padding_masks = np.ones(x_test_images_preprocessed.shape, dtype=np.float32)
 
-    x_train_images_preprocessed = pad_images_array(x_train_images_preprocessed)
-    x_test_images_preprocessed = pad_images_array(x_test_images_preprocessed)
+    x_train_images_preprocessed = pad_images_array(x_train_images_preprocessed, output_dimension_size)
+    x_test_images_preprocessed = pad_images_array(x_test_images_preprocessed, output_dimension_size)
 
-    x_train_padding_masks = pad_images_array(x_train_padding_masks)
-    x_test_padding_masks = pad_images_array(x_test_padding_masks)
+    x_train_padding_masks = pad_images_array(x_train_padding_masks, output_dimension_size)
+    x_test_padding_masks = pad_images_array(x_test_padding_masks, output_dimension_size)
 
     x_train_images_preprocessed = tf.convert_to_tensor(x_train_images_preprocessed)
     x_test_images_preprocessed = tf.convert_to_tensor(x_test_images_preprocessed)
@@ -780,11 +731,13 @@ def get_model_conv_alex(x_train, y_train):
             x = tf.keras.layers.GroupNormalization(groups=8)(x)
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                       kernel_size=(1, 1),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+        if x_res.shape[-1] != x.shape[-1]:
+            x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                           kernel_size=(1, 1),
+                                           strides=(1, 1),
+                                           padding="same",
+                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
         x = tf.keras.layers.Add()([x, x_res])
 
         x = tf.keras.layers.Lambda(einops.rearrange, arguments={"pattern": "b (h1 h2) (w1 w2) c -> b h1 w1 (c h2 w2)",
@@ -802,19 +755,19 @@ def get_model_conv_alex(x_train, y_train):
         x = tf.keras.layers.GroupNormalization(groups=8)(x)
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                       kernel_size=(1, 1),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+        if x_res.shape[-1] != x.shape[-1]:
+            x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                           kernel_size=(1, 1),
+                                           strides=(1, 1),
+                                           padding="same",
+                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
         x = tf.keras.layers.Add()([x, x_res])
 
     if num_heads is not None and key_dim is not None:
         x_res = x
 
-        x = tf.keras.layers.GroupNormalization(groups=1,
-                                               center=False,
-                                               scale=False)(x)
+        x = tf.keras.layers.GroupNormalization(groups=1)(x)
 
         x_shape = x.shape
         x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
@@ -825,12 +778,14 @@ def get_model_conv_alex(x_train, y_train):
                                             feature_transform="elu")(x, x))
         x = tf.keras.layers.Reshape(target_shape=x_shape[1:])(x)
 
-        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
-        x = tf.keras.layers.Add()([x_res, x])
+        if x_res.shape[-1] != x.shape[-1]:
+            x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                           kernel_size=(1, 1),
+                                           strides=(1, 1),
+                                           padding="same",
+                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
+        x = tf.keras.layers.Add()([x, x_res])
 
     x = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                kernel_size=(3, 3),
@@ -923,39 +878,39 @@ def translate_image(image):
     translation = random.randint(0, max_translation)
 
     if random.choice([True, False]):
-        translated_image = np.pad(image, ((0, translation), (0, 0), (0, 0)))  # noqa
+        translated_image = np.pad(image, ((0, translation), (0, 0), (0, 0)))
     else:
-        translated_image = np.pad(image, ((translation, 0), (0, 0), (0, 0)))  # noqa
+        translated_image = np.pad(image, ((translation, 0), (0, 0), (0, 0)))
 
     translation = random.randint(0, max_translation)
 
     if random.choice([True, False]):
-        translated_image = np.pad(translated_image, ((0, 0), (0, translation), (0, 0)))  # noqa
+        translated_image = np.pad(translated_image, ((0, 0), (0, translation), (0, 0)))
     else:
-        translated_image = np.pad(translated_image, ((0, 0), (translation, 0), (0, 0)))  # noqa
+        translated_image = np.pad(translated_image, ((0, 0), (translation, 0), (0, 0)))
 
     return translated_image
 
 
-def crop_image(image, output_dimension_size, output_shape=None):
+def crop_image(image, cropped_dimension_size, output_shape=None):
     cropped_image = copy.deepcopy(image)
 
     if output_shape is not None:
-        output_dimension_size = output_shape[0]
+        cropped_dimension_size = output_shape[0]
 
-    while cropped_image.shape[0] - 1 > output_dimension_size:
+    while cropped_image.shape[0] - 1 > cropped_dimension_size:
         cropped_image = cropped_image[1:-1]
 
-    if cropped_image.shape[0] > output_dimension_size:
+    if cropped_image.shape[0] > cropped_dimension_size:
         cropped_image = cropped_image[1:]
 
     if output_shape is not None:
-        output_dimension_size = output_shape[1]
+        cropped_dimension_size = output_shape[1]
 
-    while cropped_image.shape[1] - 1 > output_dimension_size:
+    while cropped_image.shape[1] - 1 > cropped_dimension_size:
         cropped_image = cropped_image[:, 1:-1]
 
-    if cropped_image.shape[1] > output_dimension_size:
+    if cropped_image.shape[1] > cropped_dimension_size:
         cropped_image = cropped_image[:, 1:]
 
     return cropped_image
@@ -1042,21 +997,29 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
                                      model.trainable_variables]
 
             current_index = current_batch_size * j
+            current_gradient_accumulation_batch_size = (
+                int(np.floor(current_batch_size / gradient_accumulation_batch_size)))
 
             losses = []
             accuracies = []
 
-            for m in range(current_batch_size):
-                current_x_train_images = get_data_from_storage(x_train_images[indices[current_index]])
-                current_x_train_original_shape = x_train_original_shapes[indices[current_index]]
-                current_x_train_padding_mask = get_data_from_storage(x_train_padding_masks[indices[current_index]])
+            for k in range(current_gradient_accumulation_batch_size):
+                current_x_train_images = []
+                current_x_train_labels = []
 
-                current_x_train_images = augmentation(current_x_train_images, current_x_train_original_shape,
-                                                      current_x_train_padding_mask)
+                for n in range(gradient_accumulation_batch_size):
+                    current_x_train_image = get_data_from_storage(x_train_images[indices[current_index]])
+                    current_x_train_original_shape = x_train_original_shapes[indices[current_index]]
+                    current_x_train_padding_mask = get_data_from_storage(x_train_padding_masks[indices[current_index]])
 
-                current_x_train_labels = x_train_labels[indices[current_index]]
+                    current_x_train_images.append(augmentation(current_x_train_image, current_x_train_original_shape,
+                                                               current_x_train_padding_mask))
+                    current_x_train_labels.append(x_train_labels[indices[current_index]])
 
-                current_x_train_images = tf.expand_dims(current_x_train_images, axis=0)
+                    current_index = current_index + 1
+
+                current_x_train_images = tf.convert_to_tensor(current_x_train_images)
+                current_x_train_labels = tf.convert_to_tensor(current_x_train_labels)
 
                 with tf.GradientTape() as tape:
                     y_pred = model([current_x_train_images], training=True)
@@ -1071,8 +1034,6 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
 
                 losses.append(loss)
                 accuracies.append(get_accuracy(current_x_train_labels, y_pred))
-
-                current_index = current_index + 1
 
             gradients = [gradient / current_batch_size for gradient in accumulated_gradients]
             gradients, _ = tf.clip_by_global_norm(gradients, 1.0)

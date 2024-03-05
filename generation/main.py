@@ -13,7 +13,7 @@ import scipy
 from skimage.color import rgb2gray
 from skimage.transform import rescale
 from skimage.filters import gaussian, unsharp_mask
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, KBinsDiscretizer
 import einops
 import tensorflow as tf
 import tensorflow_datasets as tfds
@@ -26,7 +26,7 @@ from PIL import Image
 np.seterr(all="print")
 
 
-dataset_name = "mnist"
+dataset_name = "cifar10"
 output_path = "../output/generation/"
 
 read_data_from_storage_bool = False
@@ -36,17 +36,16 @@ greyscale_bool = True
 
 alex_bool = True
 image_input_bool = True
-image_input_concatenate_bool = False
+image_input_concatenate_bool = True
 
-timestep_encoding_embedding_bool = False
+timestep_encoding_embedding_bool = True
 
 if alex_bool:
-    min_output_dimension_size = 32
-    max_output_dimension_size = 256
+    output_dimension_size = 32
 
     conditioning_input_size_divisor = 1.0
-    positional_encoding_inputs = 1.0
-    conditioning_inputs = 1.0
+    conditioning_input_embedding_bools = [True]
+    number_of_label_bins = 256
     conditional_dense_layers = 2
     filters = [32, 64, 128, 256, 512, 1024]
     conv_layers = [2, 2, 2, 2, 2, 2]
@@ -63,12 +62,10 @@ if alex_bool:
     else:
         conditioning_input_size = int(np.round((filters[-1] / 2.0) / conditioning_input_size_divisor))
 
-    conditioning_inputs_size = [int(np.round(conditioning_input_size / positional_encoding_inputs)),
-                                int(np.round(conditioning_input_size / conditioning_inputs)),
+    conditioning_inputs_size = [int(np.round(conditioning_input_size / len(conditioning_input_embedding_bools))),
                                 conditioning_input_size]
 else:
-    min_output_dimension_size = 32
-    max_output_dimension_size = 128
+    output_dimension_size = 32
 
     filters = [64, 128, 256, 512]
     num_heads = 4
@@ -94,9 +91,13 @@ epochs = 256
 
 if gradient_accumulation_bool:
     if alex_bool:
+        gradient_accumulation_batch_size = 1
+
         min_batch_size = 32
         max_batch_size = 32
     else:
+        gradient_accumulation_batch_size = 1
+
         min_batch_size = 4
         max_batch_size = 4
 else:
@@ -284,37 +285,15 @@ def convert_rgb_to_greyscale(images):
     return greyscale_images
 
 
-def rescale_images_list(images):
+def rescale_images_list(images, rescaled_dimension_size):
     print("rescale_images")
-
-    max_dimension_size = -1
-
-    images_len = len(images)
-
-    for i in range(images_len):
-        image = get_data_from_storage(images[i])
-
-        current_max_dimension_size = np.max(image.shape[:-1])
-
-        if current_max_dimension_size > max_dimension_size:
-            max_dimension_size = current_max_dimension_size
-
-    output_dimension_size = get_next_geometric_value(max_dimension_size, 2.0)
-
-    if min_output_dimension_size is not None:
-        if output_dimension_size < min_output_dimension_size:
-            output_dimension_size = min_output_dimension_size
-
-    if max_output_dimension_size is not None:
-        if output_dimension_size > max_output_dimension_size:
-            output_dimension_size = max_output_dimension_size
 
     rescaled_images = []
 
-    for i in range(images_len):
+    for i in range(len(images)):
         image = get_data_from_storage(images[i])
 
-        image = rescale(image, output_dimension_size / np.max(image.shape[:-1]), order=3, preserve_range=True,
+        image = rescale(image, rescaled_dimension_size / np.max(image.shape[:-1]), order=3, preserve_range=True,
                         channel_axis=-1)
 
         rescaled_images.append(set_data_from_storage(image, images[i]))
@@ -359,60 +338,46 @@ def normalise_images_list(x_train_images, x_test_images):
     return normalised_x_train_images, normalised_x_test_images, standard_scaler
 
 
-def pad_image(image, output_dimension_size, output_shape=None):
+def pad_image(image, padded_dimension_size, output_shape=None):
     padded_image = copy.deepcopy(image)
 
     if output_shape is not None:
-        output_dimension_size = output_shape[0]
+        padded_dimension_size = output_shape[0]
 
-    while padded_image.shape[0] + 1 < output_dimension_size:
-        padded_image = np.pad(padded_image, ((1, 1), (0, 0), (0, 0)))  # noqa
+    while padded_image.shape[0] + 1 < padded_dimension_size:
+        padded_image = np.pad(padded_image, ((1, 1), (0, 0), (0, 0)))
 
-    if padded_image.shape[0] < output_dimension_size:
-        padded_image = np.pad(padded_image, ((0, 1), (0, 0), (0, 0)))  # noqa
+    if padded_image.shape[0] < padded_dimension_size:
+        padded_image = np.pad(padded_image, ((0, 1), (0, 0), (0, 0)))
 
     if output_shape is not None:
-        output_dimension_size = output_shape[1]
+        padded_dimension_size = output_shape[1]
 
-    while padded_image.shape[1] + 1 < output_dimension_size:
-        padded_image = np.pad(padded_image, ((0, 0), (1, 1), (0, 0)))  # noqa
+    while padded_image.shape[1] + 1 < padded_dimension_size:
+        padded_image = np.pad(padded_image, ((0, 0), (1, 1), (0, 0)))
 
-    if padded_image.shape[1] < output_dimension_size:
-        padded_image = np.pad(padded_image, ((0, 0), (0, 1), (0, 0)))  # noqa
+    if padded_image.shape[1] < padded_dimension_size:
+        padded_image = np.pad(padded_image, ((0, 0), (0, 1), (0, 0)))
 
     return padded_image
 
 
-def pad_images_list(images, current_output_path):
+def pad_images_list(images, padded_dimension_size, current_output_path):
     print("pad_images")
-
-    max_dimension_size = -1
-
-    images_len = len(images)
-
-    for i in range(images_len):
-        image = get_data_from_storage(images[i])
-
-        current_max_dimension_size = np.max(image.shape[:-1])
-
-        if current_max_dimension_size > max_dimension_size:
-            max_dimension_size = current_max_dimension_size
-
-    output_dimension_size = get_next_geometric_value(max_dimension_size, 2.0)
 
     padded_images = []
     original_shapes = []
     padding_masks = []
 
-    for i in range(images_len):
+    for i in range(len(images)):
         image = get_data_from_storage(images[i])
 
         padding_mask = np.ones(image.shape, dtype=np.float32)
 
         original_shapes.append(image.shape)
-        image = pad_image(image, output_dimension_size)
+        image = pad_image(image, padded_dimension_size)
 
-        padding_mask = pad_image(padding_mask, output_dimension_size)
+        padding_mask = pad_image(padding_mask, padded_dimension_size)
 
         padded_images.append(set_data_from_storage(image, images[i]))
 
@@ -459,8 +424,8 @@ def convert_images_to_tensor_list(images):
 def preprocess_images_list(x_train_images, x_test_images):
     print("preprocess_images")
 
-    x_train_images_preprocessed = rescale_images_list(x_train_images)
-    x_test_images_preprocessed = rescale_images_list(x_test_images)
+    x_train_images_preprocessed = rescale_images_list(x_train_images, output_dimension_size)
+    x_test_images_preprocessed = rescale_images_list(x_test_images, output_dimension_size)
 
     x_train_images_preprocessed, x_test_images_preprocessed, standard_scaler = (
         normalise_images_list(x_train_images_preprocessed, x_test_images_preprocessed))
@@ -476,9 +441,9 @@ def preprocess_images_list(x_train_images, x_test_images):
         mkdir_p(x_test_padding_masks_output_path)
 
     x_train_images_preprocessed, x_train_original_shapes, x_train_padding_masks = (
-        pad_images_list(x_train_images_preprocessed, x_train_padding_masks_output_path))
+        pad_images_list(x_train_images_preprocessed, output_dimension_size, x_train_padding_masks_output_path))
     x_test_images_preprocessed, x_test_original_shapes, x_test_padding_masks = (
-        pad_images_list(x_test_images_preprocessed, x_test_padding_masks_output_path))
+        pad_images_list(x_test_images_preprocessed, output_dimension_size, x_test_padding_masks_output_path))
 
     if read_data_from_storage_bool:
         x_train_images_preprocessed = convert_images_to_tensor_list(x_train_images_preprocessed)
@@ -509,24 +474,13 @@ def preprocess_images_list(x_train_images, x_test_images):
             x_test_original_shapes, x_test_padding_masks, standard_scaler)
 
 
-def rescale_images_array(images):
+def rescale_images_array(images, rescaled_dimesnion_size):
     print("rescale_images")
-
-    max_dimension_size = np.max(images.shape[1:-1])
-    output_dimension_size = get_next_geometric_value(max_dimension_size, 2.0)
-
-    if min_output_dimension_size is not None:
-        if output_dimension_size < min_output_dimension_size:
-            output_dimension_size = min_output_dimension_size
-
-    if max_output_dimension_size is not None:
-        if output_dimension_size > max_output_dimension_size:  # noqa
-            output_dimension_size = max_output_dimension_size
 
     rescaled_images = []
 
     for i in range(len(images)):
-        rescaled_images.append(rescale(images[i], output_dimension_size / max_dimension_size, order=3,
+        rescaled_images.append(rescale(images[i], rescaled_dimesnion_size / np.max(images[i].shape[:-1]), order=3,
                                        preserve_range=True, channel_axis=-1))
 
     rescaled_images = np.array(rescaled_images)
@@ -547,25 +501,22 @@ def normalise_images_array(x_train_images, x_test_images):
     return normalised_x_train_images, normalised_x_test_images, standard_scaler
 
 
-def pad_images_array(images):
+def pad_images_array(images, padded_dimension_size):
     print("pad_images")
-
-    max_dimension_size = np.max(images.shape[1:-1])
-    output_dimension_size = get_next_geometric_value(max_dimension_size, 2.0)
 
     padded_images = copy.deepcopy(images)
 
-    while padded_images.shape[1] + 1 < output_dimension_size:
-        padded_images = np.pad(padded_images, ((0, 0), (1, 1), (0, 0), (0, 0)))  # noqa
+    while padded_images.shape[1] + 1 < padded_dimension_size:
+        padded_images = np.pad(padded_images, ((0, 0), (1, 1), (0, 0), (0, 0)))
 
-    if padded_images.shape[1] < output_dimension_size:
-        padded_images = np.pad(padded_images, ((0, 0), (0, 1), (0, 0), (0, 0)))  # noqa
+    if padded_images.shape[1] < padded_dimension_size:
+        padded_images = np.pad(padded_images, ((0, 0), (0, 1), (0, 0), (0, 0)))
 
-    while padded_images.shape[2] + 1 < output_dimension_size:
-        padded_images = np.pad(padded_images, ((0, 0,), (0, 0), (1, 1), (0, 0)))  # noqa
+    while padded_images.shape[2] + 1 < padded_dimension_size:
+        padded_images = np.pad(padded_images, ((0, 0,), (0, 0), (1, 1), (0, 0)))
 
-    if padded_images.shape[2] < output_dimension_size:
-        padded_images = np.pad(padded_images, ((0, 0), (0, 0), (0, 1), (0, 0)))  # noqa
+    if padded_images.shape[2] < padded_dimension_size:
+        padded_images = np.pad(padded_images, ((0, 0), (0, 0), (0, 1), (0, 0)))
 
     return padded_images
 
@@ -576,8 +527,8 @@ def preprocess_images_array(x_train_images, x_test_images):
     x_train_images_preprocessed = np.array(x_train_images)
     x_test_images_preprocessed = np.array(x_test_images)
 
-    x_train_images_preprocessed = rescale_images_array(x_train_images_preprocessed)
-    x_test_images_preprocessed = rescale_images_array(x_test_images_preprocessed)
+    x_train_images_preprocessed = rescale_images_array(x_train_images_preprocessed, output_dimension_size)
+    x_test_images_preprocessed = rescale_images_array(x_test_images_preprocessed, output_dimension_size)
 
     x_train_images_preprocessed, x_test_images_preprocessed, standard_scaler = (
         normalise_images_array(x_train_images_preprocessed, x_test_images_preprocessed))
@@ -595,11 +546,11 @@ def preprocess_images_array(x_train_images, x_test_images):
     x_train_padding_masks = np.ones(x_train_images_preprocessed.shape, dtype=np.float32)
     x_test_padding_masks = np.ones(x_test_images_preprocessed.shape, dtype=np.float32)
 
-    x_train_images_preprocessed = pad_images_array(x_train_images_preprocessed)
-    x_test_images_preprocessed = pad_images_array(x_test_images_preprocessed)
+    x_train_images_preprocessed = pad_images_array(x_train_images_preprocessed, output_dimension_size)
+    x_test_images_preprocessed = pad_images_array(x_test_images_preprocessed, output_dimension_size)
 
-    x_train_padding_masks = pad_images_array(x_train_padding_masks)
-    x_test_padding_masks = pad_images_array(x_test_padding_masks)
+    x_train_padding_masks = pad_images_array(x_train_padding_masks, output_dimension_size)
+    x_test_padding_masks = pad_images_array(x_test_padding_masks, output_dimension_size)
 
     x_train_images_preprocessed = tf.convert_to_tensor(x_train_images_preprocessed)
     x_test_images_preprocessed = tf.convert_to_tensor(x_test_images_preprocessed)
@@ -628,10 +579,42 @@ def preprocess_positional_encodings(x_positional_encodings):
 def preprocess_labels(x_train_labels, x_test_labels):
     print("preprocess_labels")
 
-    x_train_labels_preprocessed = tf.convert_to_tensor(x_train_labels)
-    x_test_labels_preprocessed = tf.convert_to_tensor(x_test_labels)
+    x_train_labels_preprocessed = copy.deepcopy(x_train_labels)
+    x_test_labels_preprocessed = copy.deepcopy(x_test_labels)
 
-    return x_train_labels_preprocessed, x_test_labels_preprocessed
+    preprocessors = []
+
+    if conditioning_input_embedding_bools[0]:
+        distinct_clusters = len(np.unique(x_train_labels_preprocessed))
+
+        current_number_of_label_bins = number_of_label_bins
+
+        if current_number_of_label_bins > distinct_clusters:
+            current_number_of_label_bins = distinct_clusters
+
+        k_bins_discretiser = KBinsDiscretizer(n_bins=current_number_of_label_bins, encode="ordinal",
+                                              strategy="kmeans", subsample=None)
+
+        x_train_labels_preprocessed = np.reshape(k_bins_discretiser.fit_transform(
+            np.reshape(x_train_labels_preprocessed, (-1, 1))), x_train_labels_preprocessed.shape)
+        x_test_labels_preprocessed = np.reshape(k_bins_discretiser.transform(
+            np.reshape(x_test_labels_preprocessed, (-1, 1))), x_test_labels_preprocessed.shape)
+
+        preprocessors.append(k_bins_discretiser)
+    else:
+        standard_scaler = StandardScaler()
+
+        x_train_labels_preprocessed = np.reshape(standard_scaler.fit_transform(
+            np.reshape(x_train_labels_preprocessed, (-1, 1))), x_train_labels_preprocessed.shape)
+        x_test_labels_preprocessed = np.reshape(standard_scaler.transform(
+            np.reshape(x_test_labels_preprocessed, (-1, 1))), x_test_labels_preprocessed.shape)
+
+        preprocessors.append(standard_scaler)
+
+    x_train_labels_preprocessed = tf.convert_to_tensor(x_train_labels_preprocessed)
+    x_test_labels_preprocessed = tf.convert_to_tensor(x_test_labels_preprocessed)
+
+    return x_train_labels_preprocessed, x_test_labels_preprocessed, preprocessors
 
 
 def preprocess_input(x_train_images, x_test_images, x_timestep_encodings, x_train_labels, x_test_labels):
@@ -655,11 +638,12 @@ def preprocess_input(x_train_images, x_test_images, x_timestep_encodings, x_trai
 
     x_timestep_encodings_preprocessed = preprocess_positional_encodings(x_timestep_encodings)
 
-    x_train_labels_preprocessed, x_test_labels_preprocessed = preprocess_labels(x_train_labels, x_test_labels)
+    x_train_labels_preprocessed, x_test_labels_preprocessed, preprocessors = preprocess_labels(x_train_labels,
+                                                                                               x_test_labels)
 
     return (x_train_images_preprocessed, x_train_original_shapes, x_train_padding_masks, x_test_images_preprocessed,
             x_test_original_shapes, x_test_padding_masks, standard_scaler, x_timestep_encodings_preprocessed,
-            x_train_labels_preprocessed, x_test_labels_preprocessed)
+            x_train_labels_preprocessed, x_test_labels_preprocessed, preprocessors)
 
 
 def get_previous_geometric_value(value, base):
@@ -765,7 +749,7 @@ def get_model_conv(x_train_images, x_timestep_encodings, x_train_labels):
         x = tf.keras.layers.GroupNormalization(groups=8)(x)
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-        if x_res.shape != x.shape:
+        if x_res.shape[-1] != x.shape[-1]:
             x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                            kernel_size=(1, 1),
                                            strides=(1, 1),
@@ -804,7 +788,7 @@ def get_model_conv(x_train_images, x_timestep_encodings, x_train_labels):
         x = tf.keras.layers.GroupNormalization(groups=8)(x)
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-        if x_res.shape != x.shape:
+        if x_res.shape[-1] != x.shape[-1]:
             x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                            kernel_size=(1, 1),
                                            strides=(1, 1),
@@ -833,7 +817,7 @@ def get_model_conv(x_train_images, x_timestep_encodings, x_train_labels):
                                                    center=False)(x)
             x = tf.keras.layers.Lambda(lambda x_current: x_current[0] + x_current[1])([x, x_mean])
 
-            if x_res.shape != x.shape:
+            if x_res.shape[-1] != x.shape[-1]:
                 x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                                kernel_size=(1, 1),
                                                strides=(1, 1),
@@ -883,7 +867,7 @@ def get_model_conv(x_train_images, x_timestep_encodings, x_train_labels):
     x = tf.keras.layers.GroupNormalization(groups=8)(x)
     x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-    if x_res.shape != x.shape:
+    if x_res.shape[-1] != x.shape[-1]:
         x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                        kernel_size=(1, 1),
                                        strides=(1, 1),
@@ -906,7 +890,7 @@ def get_model_conv(x_train_images, x_timestep_encodings, x_train_labels):
                                                key_dim=key_dim)(x, x)
         x = tf.keras.layers.Reshape(target_shape=x_shape[1:])(x)
 
-        if x_res.shape != x.shape:
+        if x_res.shape[-1] != x.shape[-1]:
             x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                            kernel_size=(1, 1),
                                            strides=(1, 1),
@@ -943,7 +927,7 @@ def get_model_conv(x_train_images, x_timestep_encodings, x_train_labels):
     x = tf.keras.layers.GroupNormalization(groups=8)(x)
     x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-    if x_res.shape != x.shape:
+    if x_res.shape[-1] != x.shape[-1]:
         x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                        kernel_size=(1, 1),
                                        strides=(1, 1),
@@ -983,7 +967,7 @@ def get_model_conv(x_train_images, x_timestep_encodings, x_train_labels):
         x = tf.keras.layers.GroupNormalization(groups=8)(x)
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-        if x_res.shape != x.shape:
+        if x_res.shape[-1] != x.shape[-1]:
             x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                            kernel_size=(1, 1),
                                            strides=(1, 1),
@@ -1022,7 +1006,7 @@ def get_model_conv(x_train_images, x_timestep_encodings, x_train_labels):
         x = tf.keras.layers.GroupNormalization(groups=8)(x)
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-        if x_res.shape != x.shape:
+        if x_res.shape[-1] != x.shape[-1]:
             x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                            kernel_size=(1, 1),
                                            strides=(1, 1),
@@ -1051,7 +1035,7 @@ def get_model_conv(x_train_images, x_timestep_encodings, x_train_labels):
                                                    center=False)(x)
             x = tf.keras.layers.Lambda(lambda x_current: x_current[0] + x_current[1])([x, x_mean])
 
-            if x_res.shape != x.shape:
+            if x_res.shape[-1] != x.shape[-1]:
                 x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                                kernel_size=(1, 1),
                                                strides=(1, 1),
@@ -1098,7 +1082,7 @@ def get_model_conv(x_train_images, x_timestep_encodings, x_train_labels):
     x = tf.keras.layers.GroupNormalization(groups=8)(x)
     x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-    if x_res.shape != x.shape:
+    if x_res.shape[-1] != x.shape[-1]:
         x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
                                        kernel_size=(1, 1),
                                        strides=(1, 1),
@@ -1146,52 +1130,60 @@ def get_model_conv_alex(x_train_images, x_timestep_encodings, x_train_labels):
     if timestep_encoding_embedding_bool:
         x_timestep_encoding = (
             tf.keras.layers.Embedding(input_dim=number_of_timesteps,
-                                      output_dim=conditioning_inputs_size[0],
+                                      output_dim=conditioning_inputs_size[1],
                                       embeddings_initializer=tf.keras.initializers.orthogonal)
             (x_timestep_encoding_input))
         x_timestep_encoding = x_timestep_encoding[:, 0]
     else:
-        x_timestep_encoding = (tf.keras.layers.Dense(units=conditioning_inputs_size[0],
-                                                     kernel_initializer=tf.keras.initializers.orthogonal)
-                               (x_timestep_encoding_input))
+        x_timestep_encoding = x_timestep_encoding_input
 
-    x_positional_conditioning = tf.keras.layers.Concatenate()([x_timestep_encoding])
+        for i in range(conditional_dense_layers):
+            x_timestep_encoding = (tf.keras.layers.Dense(units=conditioning_inputs_size[1],
+                                                         kernel_initializer=tf.keras.initializers.orthogonal)
+                                   (x_timestep_encoding))
+            x_timestep_encoding = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                   (x_timestep_encoding))
 
-    for i in range(conditional_dense_layers):
-        x_positional_conditioning = (tf.keras.layers.Dense(units=conditioning_inputs_size[2],
-                                                           kernel_initializer=tf.keras.initializers.orthogonal)
-                                     (x_positional_conditioning))
-        x_positional_conditioning = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                     (x_positional_conditioning))
-
-    x_label = (tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
-                                         output_dim=conditioning_inputs_size[1],
-                                         embeddings_initializer=tf.keras.initializers.orthogonal)
-               (x_label_input))
-    x_label = x_label[:, 0]
+    if conditioning_input_embedding_bools[0]:
+        x_label = (tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
+                                             output_dim=conditioning_inputs_size[0],
+                                             embeddings_initializer=tf.keras.initializers.orthogonal)
+                   (x_label_input))
+        x_label = x_label[:, 0]
+    else:
+        x_label = tf.keras.layers.Dense(units=conditioning_inputs_size[0],
+                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_label_input)
 
     x_conditioning = tf.keras.layers.Concatenate()([x_label])
 
-    for i in range(conditional_dense_layers):
-        x_conditioning = (tf.keras.layers.Dense(units=conditioning_inputs_size[2],
-                                                kernel_initializer=tf.keras.initializers.orthogonal)(x_conditioning))
-        x_conditioning = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning)
+    if np.any(conditioning_input_embedding_bools is False):
+        for i in range(conditional_dense_layers):
+            x_conditioning = tf.keras.layers.Dense(units=conditioning_inputs_size[1],
+                                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_conditioning)
+            x_conditioning = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning)
 
-    x_counterfactual_label = (
-        tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
-                                  output_dim=conditioning_inputs_size[1],
-                                  embeddings_initializer=tf.keras.initializers.orthogonal)
-        (x_counterfactual_label_input))
-    x_counterfactual_label = x_counterfactual_label[:, 0]
+    if conditioning_input_embedding_bools[0]:
+        x_counterfactual_label = (
+            tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
+                                      output_dim=conditioning_inputs_size[0],
+                                      embeddings_initializer=tf.keras.initializers.orthogonal)
+            (x_counterfactual_label_input))
+        x_counterfactual_label = x_counterfactual_label[:, 0]
+    else:
+        x_counterfactual_label = (
+            tf.keras.layers.Dense(units=conditioning_inputs_size[0],
+                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_counterfactual_label_input))
 
     x_counterfactual_conditioning = tf.keras.layers.Concatenate()([x_counterfactual_label])
 
-    for i in range(conditional_dense_layers):
-        x_counterfactual_conditioning = (tf.keras.layers.Dense(units=conditioning_inputs_size[2],
-                                                               kernel_initializer=tf.keras.initializers.orthogonal)
-                                         (x_counterfactual_conditioning))
-        x_counterfactual_conditioning = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                         (x_counterfactual_conditioning))
+    if np.any(conditioning_input_embedding_bools is False):
+        for i in range(conditional_dense_layers):
+            x_counterfactual_conditioning = (
+                tf.keras.layers.Dense(units=conditioning_inputs_size[1],
+                                      kernel_initializer=tf.keras.initializers.orthogonal)
+                (x_counterfactual_conditioning))
+            x_counterfactual_conditioning = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                             (x_counterfactual_conditioning))
 
     filters_len = len(filters)
 
@@ -1206,28 +1198,29 @@ def get_model_conv_alex(x_train_images, x_timestep_encodings, x_train_labels):
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
-            x = tf.keras.layers.GroupNormalization(groups=8)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8,
+                                                   center=False,
+                                                   scale=False)(x)
 
             conditioning_units = int(np.round(x.shape[-1] / 2.0))
 
-            x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                    kernel_initializer=tf.keras.initializers.orthogonal)
-                                              (x_positional_conditioning))
-            x_positional_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                              (x_positional_conditioning_beta))
-            x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                    kernel_initializer=tf.keras.initializers.orthogonal)
-                                              (x_positional_conditioning_beta))
+            x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                  kernel_initializer=tf.keras.initializers.orthogonal)
+                                            (x_timestep_encoding))
+            x_timestep_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                            (x_timestep_conditioning_beta))
+            x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                  kernel_initializer=tf.keras.initializers.orthogonal)
+                                            (x_timestep_conditioning_beta))
 
-            x_positional_conditioning_gamma = (
-                tf.keras.layers.Dense(units=conditioning_units,
-                                      kernel_initializer=tf.keras.initializers.orthogonal)(x_positional_conditioning))
-            x_positional_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                               (x_positional_conditioning_gamma))
-            x_positional_conditioning_gamma = (
-                tf.keras.layers.Dense(units=conditioning_units,
-                                      kernel_initializer=tf.keras.initializers.orthogonal)
-                (x_positional_conditioning_gamma))
+            x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                   kernel_initializer=tf.keras.initializers.orthogonal)
+                                             (x_timestep_encoding))
+            x_timestep_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                             (x_timestep_conditioning_gamma))
+            x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                   kernel_initializer=tf.keras.initializers.orthogonal)
+                                             (x_timestep_conditioning_gamma))
 
             x_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
                                                          kernel_initializer=tf.keras.initializers.orthogonal)
@@ -1245,10 +1238,9 @@ def get_model_conv_alex(x_train_images, x_timestep_encodings, x_train_labels):
                                                           kernel_initializer=tf.keras.initializers.orthogonal)
                                     (x_conditioning_gamma))
 
-            x_conditioning_beta = tf.keras.layers.Concatenate()([x_positional_conditioning_beta, x_conditioning_beta])
+            x_conditioning_beta = tf.keras.layers.Concatenate()([x_timestep_conditioning_beta, x_conditioning_beta])
 
-            x_conditioning_gamma = tf.keras.layers.Concatenate()([x_positional_conditioning_gamma,
-                                                                  x_conditioning_gamma])
+            x_conditioning_gamma = tf.keras.layers.Concatenate()([x_timestep_conditioning_gamma, x_conditioning_gamma])
             x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
 
             x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
@@ -1256,11 +1248,13 @@ def get_model_conv_alex(x_train_images, x_timestep_encodings, x_train_labels):
 
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                       kernel_size=(1, 1),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+        if x_res.shape[-1] != x.shape[-1]:
+            x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                           kernel_size=(1, 1),
+                                           strides=(1, 1),
+                                           padding="same",
+                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
         x = tf.keras.layers.Add()([x, x_res])
 
         x_skip = x
@@ -1268,9 +1262,7 @@ def get_model_conv_alex(x_train_images, x_timestep_encodings, x_train_labels):
         if num_heads[i] is not None and key_dim[i] is not None:
             x_res = x_skip
 
-            x_skip = tf.keras.layers.GroupNormalization(groups=1,
-                                                        center=False,
-                                                        scale=False)(x_skip)
+            x_skip = tf.keras.layers.GroupNormalization(groups=1)(x_skip)
 
             x_skip_shape = x_skip.shape
             x_skip_shape_prod = tf.math.reduce_prod(x_skip_shape[1:-1]).numpy()
@@ -1280,12 +1272,14 @@ def get_model_conv_alex(x_train_images, x_timestep_encodings, x_train_labels):
                                                     feature_transform="elu")(x_skip, x_skip)
             x_skip = tf.keras.layers.Reshape(target_shape=x_skip_shape[1:])(x_skip)
 
-            x_skip = tf.keras.layers.Conv2D(filters=x_skip.shape[-1],
-                                            kernel_size=(1, 1),
-                                            strides=(1, 1),
-                                            padding="same",
-                                            kernel_initializer=tf.keras.initializers.orthogonal)(x_skip)
-            x_skip = tf.keras.layers.Add()([x_res, x_skip])
+            if x_res.shape[-1] != x_skip.shape[-1]:
+                x_res = tf.keras.layers.Conv2D(filters=x_skip.shape[-1],
+                                               kernel_size=(1, 1),
+                                               strides=(1, 1),
+                                               padding="same",
+                                               kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
+            x_skip = tf.keras.layers.Add()([x_skip, x_res])
 
         x_skips.append(x_skip)
 
@@ -1301,28 +1295,29 @@ def get_model_conv_alex(x_train_images, x_timestep_encodings, x_train_labels):
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
-        x = tf.keras.layers.GroupNormalization(groups=8)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8,
+                                               center=False,
+                                               scale=False)(x)
 
         conditioning_units = int(np.round(x.shape[-1] / 2.0))
 
-        x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                kernel_initializer=tf.keras.initializers.orthogonal)
-                                          (x_positional_conditioning))
-        x_positional_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                          (x_positional_conditioning_beta))
-        x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                kernel_initializer=tf.keras.initializers.orthogonal)
-                                          (x_positional_conditioning_beta))
+        x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                              kernel_initializer=tf.keras.initializers.orthogonal)
+                                        (x_timestep_encoding))
+        x_timestep_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                        (x_timestep_conditioning_beta))
+        x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                              kernel_initializer=tf.keras.initializers.orthogonal)
+                                        (x_timestep_conditioning_beta))
 
-        x_positional_conditioning_gamma = (
-            tf.keras.layers.Dense(units=conditioning_units,
-                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_positional_conditioning))
-        x_positional_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                           (x_positional_conditioning_gamma))
-        x_positional_conditioning_gamma = (
-            tf.keras.layers.Dense(units=conditioning_units,
-                                  kernel_initializer=tf.keras.initializers.orthogonal)
-            (x_positional_conditioning_gamma))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_timestep_encoding))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                         (x_timestep_conditioning_gamma))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_timestep_conditioning_gamma))
 
         x_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
                                                      kernel_initializer=tf.keras.initializers.orthogonal)
@@ -1340,10 +1335,9 @@ def get_model_conv_alex(x_train_images, x_timestep_encodings, x_train_labels):
                                                       kernel_initializer=tf.keras.initializers.orthogonal)
                                 (x_conditioning_gamma))
 
-        x_conditioning_beta = tf.keras.layers.Concatenate()([x_positional_conditioning_beta, x_conditioning_beta])
+        x_conditioning_beta = tf.keras.layers.Concatenate()([x_timestep_conditioning_beta, x_conditioning_beta])
 
-        x_conditioning_gamma = tf.keras.layers.Concatenate()([x_positional_conditioning_gamma,
-                                                              x_conditioning_gamma])
+        x_conditioning_gamma = tf.keras.layers.Concatenate()([x_timestep_conditioning_gamma, x_conditioning_gamma])
         x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
 
         x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
@@ -1351,19 +1345,19 @@ def get_model_conv_alex(x_train_images, x_timestep_encodings, x_train_labels):
 
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-    x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+    if x_res.shape[-1] != x.shape[-1]:
+        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                       kernel_size=(1, 1),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
     x = tf.keras.layers.Add()([x, x_res])
 
     if num_heads[-1] is not None and key_dim[-1] is not None:
         x_res = x
 
-        x = tf.keras.layers.GroupNormalization(groups=1,
-                                               center=False,
-                                               scale=False)(x)
+        x = tf.keras.layers.GroupNormalization(groups=1)(x)
 
         x_shape = x.shape
         x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
@@ -1373,12 +1367,14 @@ def get_model_conv_alex(x_train_images, x_timestep_encodings, x_train_labels):
                                            feature_transform="elu")(x, x)
         x = tf.keras.layers.Reshape(target_shape=x_shape[1:])(x)
 
-        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
-        x = tf.keras.layers.Add()([x_res, x])
+        if x_res.shape[-1] != x.shape[-1]:
+            x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                           kernel_size=(1, 1),
+                                           strides=(1, 1),
+                                           padding="same",
+                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
+        x = tf.keras.layers.Add()([x, x_res])
 
     for i in range(conv_layers[-1]):
         x = tf.keras.layers.Conv2D(filters=filters[-1],
@@ -1386,28 +1382,29 @@ def get_model_conv_alex(x_train_images, x_timestep_encodings, x_train_labels):
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
-        x = tf.keras.layers.GroupNormalization(groups=8)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8,
+                                               center=False,
+                                               scale=False)(x)
 
         conditioning_units = int(np.round(x.shape[-1] / 2.0))
 
-        x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                kernel_initializer=tf.keras.initializers.orthogonal)
-                                          (x_positional_conditioning))
-        x_positional_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                          (x_positional_conditioning_beta))
-        x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                kernel_initializer=tf.keras.initializers.orthogonal)
-                                          (x_positional_conditioning_beta))
+        x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                              kernel_initializer=tf.keras.initializers.orthogonal)
+                                        (x_timestep_encoding))
+        x_timestep_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                        (x_timestep_conditioning_beta))
+        x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                              kernel_initializer=tf.keras.initializers.orthogonal)
+                                        (x_timestep_conditioning_beta))
 
-        x_positional_conditioning_gamma = (
-            tf.keras.layers.Dense(units=conditioning_units,
-                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_positional_conditioning))
-        x_positional_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                           (x_positional_conditioning_gamma))
-        x_positional_conditioning_gamma = (
-            tf.keras.layers.Dense(units=conditioning_units,
-                                  kernel_initializer=tf.keras.initializers.orthogonal)
-            (x_positional_conditioning_gamma))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_timestep_encoding))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                         (x_timestep_conditioning_gamma))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_timestep_conditioning_gamma))
 
         x_counterfactual_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
                                                                     kernel_initializer=tf.keras.initializers.orthogonal)
@@ -1428,10 +1425,10 @@ def get_model_conv_alex(x_train_images, x_timestep_encodings, x_train_labels):
                                   kernel_initializer=tf.keras.initializers.orthogonal)
             (x_counterfactual_conditioning_gamma))
 
-        x_counterfactual_conditioning_beta = tf.keras.layers.Concatenate()([x_positional_conditioning_beta,
+        x_counterfactual_conditioning_beta = tf.keras.layers.Concatenate()([x_timestep_conditioning_beta,
                                                                             x_counterfactual_conditioning_beta])
 
-        x_counterfactual_conditioning_gamma = tf.keras.layers.Concatenate()([x_positional_conditioning_gamma,
+        x_counterfactual_conditioning_gamma = tf.keras.layers.Concatenate()([x_timestep_conditioning_gamma,
                                                                              x_counterfactual_conditioning_gamma])
         x_counterfactual_conditioning_gamma = (tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)
                                                (x_counterfactual_conditioning_gamma))
@@ -1441,11 +1438,13 @@ def get_model_conv_alex(x_train_images, x_timestep_encodings, x_train_labels):
 
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-    x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+    if x_res.shape[-1] != x.shape[-1]:
+        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                       kernel_size=(1, 1),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
     x = tf.keras.layers.Add()([x, x_res])
 
     for i in range(filters_len - 2, -1, -1):
@@ -1470,28 +1469,29 @@ def get_model_conv_alex(x_train_images, x_timestep_encodings, x_train_labels):
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
-            x = tf.keras.layers.GroupNormalization(groups=8)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8,
+                                                   center=False,
+                                                   scale=False)(x)
 
             conditioning_units = int(np.round(x.shape[-1] / 2.0))
 
-            x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                    kernel_initializer=tf.keras.initializers.orthogonal)
-                                              (x_positional_conditioning))
-            x_positional_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                              (x_positional_conditioning_beta))
-            x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                    kernel_initializer=tf.keras.initializers.orthogonal)
-                                              (x_positional_conditioning_beta))
+            x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                  kernel_initializer=tf.keras.initializers.orthogonal)
+                                            (x_timestep_encoding))
+            x_timestep_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                            (x_timestep_conditioning_beta))
+            x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                  kernel_initializer=tf.keras.initializers.orthogonal)
+                                            (x_timestep_conditioning_beta))
 
-            x_positional_conditioning_gamma = (
-                tf.keras.layers.Dense(units=conditioning_units,
-                                      kernel_initializer=tf.keras.initializers.orthogonal)(x_positional_conditioning))
-            x_positional_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                               (x_positional_conditioning_gamma))
-            x_positional_conditioning_gamma = (
-                tf.keras.layers.Dense(units=conditioning_units,
-                                      kernel_initializer=tf.keras.initializers.orthogonal)
-                (x_positional_conditioning_gamma))
+            x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                   kernel_initializer=tf.keras.initializers.orthogonal)
+                                             (x_timestep_encoding))
+            x_timestep_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                             (x_timestep_conditioning_gamma))
+            x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                   kernel_initializer=tf.keras.initializers.orthogonal)
+                                             (x_timestep_conditioning_gamma))
 
             x_counterfactual_conditioning_beta = (
                 tf.keras.layers.Dense(units=conditioning_units,
@@ -1515,10 +1515,10 @@ def get_model_conv_alex(x_train_images, x_timestep_encodings, x_train_labels):
                                       kernel_initializer=tf.keras.initializers.orthogonal)
                 (x_counterfactual_conditioning_gamma))
 
-            x_counterfactual_conditioning_beta = tf.keras.layers.Concatenate()([x_positional_conditioning_beta,
+            x_counterfactual_conditioning_beta = tf.keras.layers.Concatenate()([x_timestep_conditioning_beta,
                                                                                 x_counterfactual_conditioning_beta])
 
-            x_counterfactual_conditioning_gamma = tf.keras.layers.Concatenate()([x_positional_conditioning_gamma,
+            x_counterfactual_conditioning_gamma = tf.keras.layers.Concatenate()([x_timestep_conditioning_gamma,
                                                                                  x_counterfactual_conditioning_gamma])
             x_counterfactual_conditioning_gamma = (tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)
                                                    (x_counterfactual_conditioning_gamma))
@@ -1528,11 +1528,13 @@ def get_model_conv_alex(x_train_images, x_timestep_encodings, x_train_labels):
 
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                       kernel_size=(1, 1),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+        if x_res.shape[-1] != x.shape[-1]:
+            x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                           kernel_size=(1, 1),
+                                           strides=(1, 1),
+                                           padding="same",
+                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
         x = tf.keras.layers.Add()([x, x_res])
 
     x = tf.keras.layers.Conv2D(filters=image_input_shape[-1],
@@ -1585,52 +1587,60 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
     if timestep_encoding_embedding_bool:
         x_timestep_encoding = (
             tf.keras.layers.Embedding(input_dim=number_of_timesteps,
-                                      output_dim=conditioning_inputs_size[0],
+                                      output_dim=conditioning_inputs_size[1],
                                       embeddings_initializer=tf.keras.initializers.orthogonal)
             (x_timestep_encoding_input))
         x_timestep_encoding = x_timestep_encoding[:, 0]
     else:
-        x_timestep_encoding = (tf.keras.layers.Dense(units=conditioning_inputs_size[0],
-                                                     kernel_initializer=tf.keras.initializers.orthogonal)
-                               (x_timestep_encoding_input))
+        x_timestep_encoding = x_timestep_encoding_input
 
-    x_positional_conditioning = tf.keras.layers.Concatenate()([x_timestep_encoding])
+        for i in range(conditional_dense_layers):
+            x_timestep_encoding = (tf.keras.layers.Dense(units=conditioning_inputs_size[1],
+                                                         kernel_initializer=tf.keras.initializers.orthogonal)
+                                   (x_timestep_encoding))
+            x_timestep_encoding = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                   (x_timestep_encoding))
 
-    for i in range(conditional_dense_layers):
-        x_positional_conditioning = (tf.keras.layers.Dense(units=conditioning_inputs_size[2],
-                                                           kernel_initializer=tf.keras.initializers.orthogonal)
-                                     (x_positional_conditioning))
-        x_positional_conditioning = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                     (x_positional_conditioning))
-
-    x_label = (tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
-                                         output_dim=conditioning_inputs_size[1],
-                                         embeddings_initializer=tf.keras.initializers.orthogonal)
-               (x_label_input))
-    x_label = x_label[:, 0]
+    if conditioning_input_embedding_bools[0]:
+        x_label = (tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
+                                             output_dim=conditioning_inputs_size[0],
+                                             embeddings_initializer=tf.keras.initializers.orthogonal)
+                   (x_label_input))
+        x_label = x_label[:, 0]
+    else:
+        x_label = tf.keras.layers.Dense(units=conditioning_inputs_size[0],
+                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_label_input)
 
     x_conditioning = tf.keras.layers.Concatenate()([x_label])
 
-    for i in range(conditional_dense_layers):
-        x_conditioning = (tf.keras.layers.Dense(units=conditioning_inputs_size[2],
-                                                kernel_initializer=tf.keras.initializers.orthogonal)(x_conditioning))
-        x_conditioning = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning)
+    if np.any(conditioning_input_embedding_bools is False):
+        for i in range(conditional_dense_layers):
+            x_conditioning = tf.keras.layers.Dense(units=conditioning_inputs_size[1],
+                                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_conditioning)
+            x_conditioning = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning)
 
-    x_counterfactual_label = (
-        tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
-                                  output_dim=conditioning_inputs_size[1],
-                                  embeddings_initializer=tf.keras.initializers.orthogonal)
-        (x_counterfactual_label_input))
-    x_counterfactual_label = x_counterfactual_label[:, 0]
+    if conditioning_input_embedding_bools[0]:
+        x_counterfactual_label = (
+            tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
+                                      output_dim=conditioning_inputs_size[0],
+                                      embeddings_initializer=tf.keras.initializers.orthogonal)
+            (x_counterfactual_label_input))
+        x_counterfactual_label = x_counterfactual_label[:, 0]
+    else:
+        x_counterfactual_label = (
+            tf.keras.layers.Dense(units=conditioning_inputs_size[0],
+                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_counterfactual_label_input))
 
     x_counterfactual_conditioning = tf.keras.layers.Concatenate()([x_counterfactual_label])
 
-    for i in range(conditional_dense_layers):
-        x_counterfactual_conditioning = (tf.keras.layers.Dense(units=conditioning_inputs_size[2],
-                                                               kernel_initializer=tf.keras.initializers.orthogonal)
-                                         (x_counterfactual_conditioning))
-        x_counterfactual_conditioning = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                         (x_counterfactual_conditioning))
+    if np.any(conditioning_input_embedding_bools is False):
+        for i in range(conditional_dense_layers):
+            x_counterfactual_conditioning = (
+                tf.keras.layers.Dense(units=conditioning_inputs_size[1],
+                                      kernel_initializer=tf.keras.initializers.orthogonal)
+                (x_counterfactual_conditioning))
+            x_counterfactual_conditioning = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                             (x_counterfactual_conditioning))
 
     filters_len = len(filters)
 
@@ -1643,7 +1653,9 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
                                              strides=(1, 1),
                                              padding="same",
                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_image)
-            x_image = tf.keras.layers.GroupNormalization(groups=8)(x_image)
+            x_image = tf.keras.layers.GroupNormalization(groups=8,
+                                                         center=False,
+                                                         scale=False)(x_image)
 
             x_conditioning_beta = (tf.keras.layers.Dense(units=x_image.shape[-1],
                                                          kernel_initializer=tf.keras.initializers.orthogonal)
@@ -1667,11 +1679,13 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
 
             x_image = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_image)
 
-        x_res = tf.keras.layers.Conv2D(filters=x_image.shape[-1],
-                                       kernel_size=(1, 1),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+        if x_res.shape[-1] != x_image.shape[-1]:
+            x_res = tf.keras.layers.Conv2D(filters=x_image.shape[-1],
+                                           kernel_size=(1, 1),
+                                           strides=(1, 1),
+                                           padding="same",
+                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
         x_image = tf.keras.layers.Add()([x_image, x_res])
 
         x_image = tf.keras.layers.Lambda(einops.rearrange,
@@ -1687,7 +1701,9 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
                                          strides=(1, 1),
                                          padding="same",
                                          kernel_initializer=tf.keras.initializers.orthogonal)(x_image)
-        x_image = tf.keras.layers.GroupNormalization(groups=8)(x_image)
+        x_image = tf.keras.layers.GroupNormalization(groups=8,
+                                                     center=False,
+                                                     scale=False)(x_image)
 
         x_conditioning_beta = (tf.keras.layers.Dense(units=x_image.shape[-1],
                                                      kernel_initializer=tf.keras.initializers.orthogonal)
@@ -1711,19 +1727,19 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
 
         x_image = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_image)
 
-    x_res = tf.keras.layers.Conv2D(filters=x_image.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+    if x_res.shape[-1] != x_image.shape[-1]:
+        x_res = tf.keras.layers.Conv2D(filters=x_image.shape[-1],
+                                       kernel_size=(1, 1),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
     x_image = tf.keras.layers.Add()([x_image, x_res])
 
     if num_heads[-1] is not None and key_dim[-1] is not None:
         x_res = x_image
 
-        x_image = tf.keras.layers.GroupNormalization(groups=1,
-                                                     center=False,
-                                                     scale=False)(x_image)
+        x_image = tf.keras.layers.GroupNormalization(groups=1)(x_image)
 
         x_image_shape = x_image.shape
         x_image_shape_prod = tf.math.reduce_prod(x_image_shape[1:-1]).numpy()
@@ -1733,12 +1749,14 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
                                                  feature_transform="elu")(x_image, x_image)
         x_image = tf.keras.layers.Reshape(target_shape=x_image_shape[1:])(x_image)
 
-        x_image = tf.keras.layers.Conv2D(filters=x_image.shape[-1],
-                                         kernel_size=(1, 1),
-                                         strides=(1, 1),
-                                         padding="same",
-                                         kernel_initializer=tf.keras.initializers.orthogonal)(x_image)
-        x_image = tf.keras.layers.Add()([x_res, x_image])
+        if x_res.shape[-1] != x_image.shape[-1]:
+            x_res = tf.keras.layers.Conv2D(filters=x_image.shape[-1],
+                                           kernel_size=(1, 1),
+                                           strides=(1, 1),
+                                           padding="same",
+                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
+        x_image = tf.keras.layers.Add()([x_image, x_res])
 
     x_image = tf.keras.layers.Conv2D(filters=image_input_latent_size,
                                      kernel_size=(1, 1),
@@ -1752,7 +1770,9 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
                                          strides=(1, 1),
                                          padding="same",
                                          kernel_initializer=tf.keras.initializers.orthogonal)(x_image)
-        x_image = tf.keras.layers.GroupNormalization(groups=8)(x_image)
+        x_image = tf.keras.layers.GroupNormalization(groups=8,
+                                                     center=False,
+                                                     scale=False)(x_image)
 
         x_conditioning_beta = (tf.keras.layers.Dense(units=x_image.shape[-1],
                                                      kernel_initializer=tf.keras.initializers.orthogonal)
@@ -1776,11 +1796,13 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
 
         x_image = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_image)
 
-    x_res = tf.keras.layers.Conv2D(filters=x_image.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+    if x_res.shape[-1] != x_image.shape[-1]:
+        x_res = tf.keras.layers.Conv2D(filters=x_image.shape[-1],
+                                       kernel_size=(1, 1),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
     x_image = tf.keras.layers.Add()([x_image, x_res])
 
     for i in range(filters_len - 2, -1, -1):
@@ -1797,7 +1819,9 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
                                              strides=(1, 1),
                                              padding="same",
                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_image)
-            x_image = tf.keras.layers.GroupNormalization(groups=8)(x_image)
+            x_image = tf.keras.layers.GroupNormalization(groups=8,
+                                                         center=False,
+                                                         scale=False)(x_image)
 
             x_conditioning_beta = (tf.keras.layers.Dense(units=x_image.shape[-1],
                                                          kernel_initializer=tf.keras.initializers.orthogonal)
@@ -1821,11 +1845,13 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
 
             x_image = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_image)
 
-        x_res = tf.keras.layers.Conv2D(filters=x_image.shape[-1],
-                                       kernel_size=(1, 1),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+        if x_res.shape[-1] != x_image.shape[-1]:
+            x_res = tf.keras.layers.Conv2D(filters=x_image.shape[-1],
+                                           kernel_size=(1, 1),
+                                           strides=(1, 1),
+                                           padding="same",
+                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
         x_image = tf.keras.layers.Add()([x_image, x_res])
 
     x_image = tf.keras.layers.Conv2D(filters=image_input_shape[-1],
@@ -1847,39 +1873,42 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
-            x = tf.keras.layers.GroupNormalization(groups=8)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8,
+                                                   center=False,
+                                                   scale=False)(x)
 
-            x_positional_conditioning_beta = (tf.keras.layers.Dense(units=x.shape[-1],
-                                                                    kernel_initializer=tf.keras.initializers.orthogonal)
-                                              (x_positional_conditioning))
-            x_positional_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                              (x_positional_conditioning_beta))
-            x_positional_conditioning_beta = (tf.keras.layers.Dense(units=x.shape[-1],
-                                                                    kernel_initializer=tf.keras.initializers.orthogonal)
-                                              (x_positional_conditioning_beta))
+            x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=x.shape[-1],
+                                                                  kernel_initializer=tf.keras.initializers.orthogonal)
+                                            (x_timestep_encoding))
+            x_timestep_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                            (x_timestep_conditioning_beta))
+            x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=x.shape[-1],
+                                                                  kernel_initializer=tf.keras.initializers.orthogonal)
+                                            (x_timestep_conditioning_beta))
 
-            x_positional_conditioning_gamma = (
-                tf.keras.layers.Dense(units=x.shape[-1],
-                                      kernel_initializer=tf.keras.initializers.orthogonal)(x_positional_conditioning))
-            x_positional_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                               (x_positional_conditioning_gamma))
-            x_positional_conditioning_gamma = (
-                tf.keras.layers.Dense(units=x.shape[-1],
-                                      kernel_initializer=tf.keras.initializers.orthogonal)
-                (x_positional_conditioning_gamma))
-            x_positional_conditioning_gamma = (tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)
-                                               (x_positional_conditioning_gamma))
+            x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=x.shape[-1],
+                                                                   kernel_initializer=tf.keras.initializers.orthogonal)
+                                             (x_timestep_encoding))
+            x_timestep_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                             (x_timestep_conditioning_gamma))
+            x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=x.shape[-1],
+                                                                   kernel_initializer=tf.keras.initializers.orthogonal)
+                                             (x_timestep_conditioning_gamma))
+            x_timestep_conditioning_gamma = (tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)
+                                             (x_timestep_conditioning_gamma))
 
-            x = tf.keras.layers.Multiply()([x, x_positional_conditioning_gamma])
-            x = tf.keras.layers.Add()([x, x_positional_conditioning_beta])
+            x = tf.keras.layers.Multiply()([x, x_timestep_conditioning_gamma])
+            x = tf.keras.layers.Add()([x, x_timestep_conditioning_beta])
 
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                       kernel_size=(1, 1),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+        if x_res.shape[-1] != x.shape[-1]:
+            x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                           kernel_size=(1, 1),
+                                           strides=(1, 1),
+                                           padding="same",
+                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
         x = tf.keras.layers.Add()([x, x_res])
 
         x_skip = x
@@ -1887,9 +1916,7 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
         if num_heads[i] is not None and key_dim[i] is not None:
             x_res = x_skip
 
-            x_skip = tf.keras.layers.GroupNormalization(groups=1,
-                                                        center=False,
-                                                        scale=False)(x_skip)
+            x_skip = tf.keras.layers.GroupNormalization(groups=1)(x_skip)
 
             x_skip_shape = x_skip.shape
             x_skip_shape_prod = tf.math.reduce_prod(x_skip_shape[1:-1]).numpy()
@@ -1899,12 +1926,14 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
                                                     feature_transform="elu")(x_skip, x_skip)
             x_skip = tf.keras.layers.Reshape(target_shape=x_skip_shape[1:])(x_skip)
 
-            x_skip = tf.keras.layers.Conv2D(filters=x_skip.shape[-1],
-                                            kernel_size=(1, 1),
-                                            strides=(1, 1),
-                                            padding="same",
-                                            kernel_initializer=tf.keras.initializers.orthogonal)(x_skip)
-            x_skip = tf.keras.layers.Add()([x_res, x_skip])
+            if x_res.shape[-1] != x_skip.shape[-1]:
+                x_res = tf.keras.layers.Conv2D(filters=x_skip.shape[-1],
+                                               kernel_size=(1, 1),
+                                               strides=(1, 1),
+                                               padding="same",
+                                               kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
+            x_skip = tf.keras.layers.Add()([x_skip, x_res])
 
         x_skips.append(x_skip)
 
@@ -1920,47 +1949,48 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
-        x = tf.keras.layers.GroupNormalization(groups=8)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8,
+                                               center=False,
+                                               scale=False)(x)
 
-        x_positional_conditioning_beta = (tf.keras.layers.Dense(units=x.shape[-1],
-                                                                kernel_initializer=tf.keras.initializers.orthogonal)
-                                          (x_positional_conditioning))
-        x_positional_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                          (x_positional_conditioning_beta))
-        x_positional_conditioning_beta = (tf.keras.layers.Dense(units=x.shape[-1],
-                                                                kernel_initializer=tf.keras.initializers.orthogonal)
-                                          (x_positional_conditioning_beta))
+        x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=x.shape[-1],
+                                                              kernel_initializer=tf.keras.initializers.orthogonal)
+                                        (x_timestep_encoding))
+        x_timestep_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                        (x_timestep_conditioning_beta))
+        x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=x.shape[-1],
+                                                              kernel_initializer=tf.keras.initializers.orthogonal)
+                                        (x_timestep_conditioning_beta))
 
-        x_positional_conditioning_gamma = (
-            tf.keras.layers.Dense(units=x.shape[-1],
-                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_positional_conditioning))
-        x_positional_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                           (x_positional_conditioning_gamma))
-        x_positional_conditioning_gamma = (
-            tf.keras.layers.Dense(units=x.shape[-1],
-                                  kernel_initializer=tf.keras.initializers.orthogonal)
-            (x_positional_conditioning_gamma))
-        x_positional_conditioning_gamma = (tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)
-                                           (x_positional_conditioning_gamma))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=x.shape[-1],
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_timestep_encoding))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                         (x_timestep_conditioning_gamma))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=x.shape[-1],
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_timestep_conditioning_gamma))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)
+                                         (x_timestep_conditioning_gamma))
 
-        x = tf.keras.layers.Multiply()([x, x_positional_conditioning_gamma])
-        x = tf.keras.layers.Add()([x, x_positional_conditioning_beta])
+        x = tf.keras.layers.Multiply()([x, x_timestep_conditioning_gamma])
+        x = tf.keras.layers.Add()([x, x_timestep_conditioning_beta])
 
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-    x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+    if x_res.shape[-1] != x.shape[-1]:
+        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                       kernel_size=(1, 1),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
     x = tf.keras.layers.Add()([x, x_res])
 
     if num_heads[-1] is not None and key_dim[-1] is not None:
         x_res = x
 
-        x = tf.keras.layers.GroupNormalization(groups=1,
-                                               center=False,
-                                               scale=False)(x)
+        x = tf.keras.layers.GroupNormalization(groups=1)(x)
 
         x_shape = x.shape
         x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
@@ -1970,12 +2000,14 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
                                            feature_transform="elu")(x, x)
         x = tf.keras.layers.Reshape(target_shape=x_shape[1:])(x)
 
-        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
-        x = tf.keras.layers.Add()([x_res, x])
+        if x_res.shape[-1] != x.shape[-1]:
+            x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                           kernel_size=(1, 1),
+                                           strides=(1, 1),
+                                           padding="same",
+                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
+        x = tf.keras.layers.Add()([x, x_res])
 
     for i in range(conv_layers[-1]):
         x = tf.keras.layers.Conv2D(filters=filters[-1],
@@ -1983,28 +2015,29 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
-        x = tf.keras.layers.GroupNormalization(groups=8)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8,
+                                               center=False,
+                                               scale=False)(x)
 
         conditioning_units = int(np.round(x.shape[-1] / 2.0))
 
-        x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                kernel_initializer=tf.keras.initializers.orthogonal)
-                                          (x_positional_conditioning))
-        x_positional_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                          (x_positional_conditioning_beta))
-        x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                kernel_initializer=tf.keras.initializers.orthogonal)
-                                          (x_positional_conditioning_beta))
+        x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                              kernel_initializer=tf.keras.initializers.orthogonal)
+                                        (x_timestep_encoding))
+        x_timestep_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                        (x_timestep_conditioning_beta))
+        x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                              kernel_initializer=tf.keras.initializers.orthogonal)
+                                        (x_timestep_conditioning_beta))
 
-        x_positional_conditioning_gamma = (
-            tf.keras.layers.Dense(units=conditioning_units,
-                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_positional_conditioning))
-        x_positional_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                           (x_positional_conditioning_gamma))
-        x_positional_conditioning_gamma = (
-            tf.keras.layers.Dense(units=conditioning_units,
-                                  kernel_initializer=tf.keras.initializers.orthogonal)
-            (x_positional_conditioning_gamma))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_timestep_encoding))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                         (x_timestep_conditioning_gamma))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_timestep_conditioning_gamma))
 
         x_counterfactual_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
                                                                     kernel_initializer=tf.keras.initializers.orthogonal)
@@ -2025,10 +2058,10 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
                                   kernel_initializer=tf.keras.initializers.orthogonal)
             (x_counterfactual_conditioning_gamma))
 
-        x_counterfactual_conditioning_beta = tf.keras.layers.Concatenate()([x_positional_conditioning_beta,
+        x_counterfactual_conditioning_beta = tf.keras.layers.Concatenate()([x_timestep_conditioning_beta,
                                                                             x_counterfactual_conditioning_beta])
 
-        x_counterfactual_conditioning_gamma = tf.keras.layers.Concatenate()([x_positional_conditioning_gamma,
+        x_counterfactual_conditioning_gamma = tf.keras.layers.Concatenate()([x_timestep_conditioning_gamma,
                                                                              x_counterfactual_conditioning_gamma])
         x_counterfactual_conditioning_gamma = (tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)
                                                (x_counterfactual_conditioning_gamma))
@@ -2038,11 +2071,13 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
 
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-    x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+    if x_res.shape[-1] != x.shape[-1]:
+        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                       kernel_size=(1, 1),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
     x = tf.keras.layers.Add()([x, x_res])
 
     for i in range(filters_len - 2, -1, -1):
@@ -2067,32 +2102,34 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
-            x = tf.keras.layers.GroupNormalization(groups=8)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8,
+                                                   center=False,
+                                                   scale=False)(x)
 
             conditioning_units = int(np.round(x.shape[-1] / 2.0))
 
-            x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                    kernel_initializer=tf.keras.initializers.orthogonal)
-                                              (x_positional_conditioning))
-            x_positional_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                              (x_positional_conditioning_beta))
-            x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                    kernel_initializer=tf.keras.initializers.orthogonal)
-                                              (x_positional_conditioning_beta))
+            x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                  kernel_initializer=tf.keras.initializers.orthogonal)
+                                            (x_timestep_encoding))
+            x_timestep_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                            (x_timestep_conditioning_beta))
+            x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                  kernel_initializer=tf.keras.initializers.orthogonal)
+                                            (x_timestep_conditioning_beta))
 
-            x_positional_conditioning_gamma = (
-                tf.keras.layers.Dense(units=conditioning_units,
-                                      kernel_initializer=tf.keras.initializers.orthogonal)(x_positional_conditioning))
-            x_positional_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                               (x_positional_conditioning_gamma))
-            x_positional_conditioning_gamma = (
+            x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                   kernel_initializer=tf.keras.initializers.orthogonal)
+                                             (x_timestep_encoding))
+            x_timestep_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                             (x_timestep_conditioning_gamma))
+            x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                   kernel_initializer=tf.keras.initializers.orthogonal)
+                                             (x_timestep_conditioning_gamma))
+
+            x_counterfactual_conditioning_beta = (
                 tf.keras.layers.Dense(units=conditioning_units,
                                       kernel_initializer=tf.keras.initializers.orthogonal)
-                (x_positional_conditioning_gamma))
-
-            x_counterfactual_conditioning_beta = (tf.keras.layers.Dense(
-                units=conditioning_units,
-                kernel_initializer=tf.keras.initializers.orthogonal)(x_counterfactual_conditioning))
+                (x_counterfactual_conditioning))
             x_counterfactual_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
                                                   (x_counterfactual_conditioning_beta))
             x_counterfactual_conditioning_beta = (
@@ -2111,10 +2148,10 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
                                       kernel_initializer=tf.keras.initializers.orthogonal)
                 (x_counterfactual_conditioning_gamma))
 
-            x_counterfactual_conditioning_beta = tf.keras.layers.Concatenate()([x_positional_conditioning_beta,
+            x_counterfactual_conditioning_beta = tf.keras.layers.Concatenate()([x_timestep_conditioning_beta,
                                                                                 x_counterfactual_conditioning_beta])
 
-            x_counterfactual_conditioning_gamma = tf.keras.layers.Concatenate()([x_positional_conditioning_gamma,
+            x_counterfactual_conditioning_gamma = tf.keras.layers.Concatenate()([x_timestep_conditioning_gamma,
                                                                                  x_counterfactual_conditioning_gamma])
             x_counterfactual_conditioning_gamma = (tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)
                                                    (x_counterfactual_conditioning_gamma))
@@ -2124,11 +2161,13 @@ def get_model_conv_alex_image_input_concatenate(x_train_images, x_timestep_encod
 
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                       kernel_size=(1, 1),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+        if x_res.shape[-1] != x.shape[-1]:
+            x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                           kernel_size=(1, 1),
+                                           strides=(1, 1),
+                                           padding="same",
+                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
         x = tf.keras.layers.Add()([x, x_res])
 
     x = tf.keras.layers.Conv2D(filters=image_input_shape[-1],
@@ -2181,52 +2220,60 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
     if timestep_encoding_embedding_bool:
         x_timestep_encoding = (
             tf.keras.layers.Embedding(input_dim=number_of_timesteps,
-                                      output_dim=conditioning_inputs_size[0],
+                                      output_dim=conditioning_inputs_size[1],
                                       embeddings_initializer=tf.keras.initializers.orthogonal)
             (x_timestep_encoding_input))
         x_timestep_encoding = x_timestep_encoding[:, 0]
     else:
-        x_timestep_encoding = (tf.keras.layers.Dense(units=conditioning_inputs_size[0],
-                                                     kernel_initializer=tf.keras.initializers.orthogonal)
-                               (x_timestep_encoding_input))
+        x_timestep_encoding = x_timestep_encoding_input
 
-    x_positional_conditioning = tf.keras.layers.Concatenate()([x_timestep_encoding])
+        for i in range(conditional_dense_layers):
+            x_timestep_encoding = (tf.keras.layers.Dense(units=conditioning_inputs_size[1],
+                                                         kernel_initializer=tf.keras.initializers.orthogonal)
+                                   (x_timestep_encoding))
+            x_timestep_encoding = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                   (x_timestep_encoding))
 
-    for i in range(conditional_dense_layers):
-        x_positional_conditioning = (tf.keras.layers.Dense(units=conditioning_inputs_size[2],
-                                                           kernel_initializer=tf.keras.initializers.orthogonal)
-                                     (x_positional_conditioning))
-        x_positional_conditioning = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                     (x_positional_conditioning))
-
-    x_label = (tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
-                                         output_dim=conditioning_inputs_size[1],
-                                         embeddings_initializer=tf.keras.initializers.orthogonal)
-               (x_label_input))
-    x_label = x_label[:, 0]
+    if conditioning_input_embedding_bools[0]:
+        x_label = (tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
+                                             output_dim=conditioning_inputs_size[0],
+                                             embeddings_initializer=tf.keras.initializers.orthogonal)
+                   (x_label_input))
+        x_label = x_label[:, 0]
+    else:
+        x_label = tf.keras.layers.Dense(units=conditioning_inputs_size[0],
+                                        kernel_initializer=tf.keras.initializers.orthogonal)(x_label_input)
 
     x_conditioning = tf.keras.layers.Concatenate()([x_label])
 
-    for i in range(conditional_dense_layers):
-        x_conditioning = (tf.keras.layers.Dense(units=conditioning_inputs_size[2],
-                                                kernel_initializer=tf.keras.initializers.orthogonal)(x_conditioning))
-        x_conditioning = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning)
+    if np.any(conditioning_input_embedding_bools is False):
+        for i in range(conditional_dense_layers):
+            x_conditioning = tf.keras.layers.Dense(units=conditioning_inputs_size[1],
+                                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_conditioning)
+            x_conditioning = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_conditioning)
 
-    x_counterfactual_label = (
-        tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
-                                  output_dim=conditioning_inputs_size[1],
-                                  embeddings_initializer=tf.keras.initializers.orthogonal)
-        (x_counterfactual_label_input))
-    x_counterfactual_label = x_counterfactual_label[:, 0]
+    if conditioning_input_embedding_bools[0]:
+        x_counterfactual_label = (
+            tf.keras.layers.Embedding(input_dim=int(tf.math.round(tf.reduce_max(x_train_labels) + 1.0)),
+                                      output_dim=conditioning_inputs_size[0],
+                                      embeddings_initializer=tf.keras.initializers.orthogonal)
+            (x_counterfactual_label_input))
+        x_counterfactual_label = x_counterfactual_label[:, 0]
+    else:
+        x_counterfactual_label = (
+            tf.keras.layers.Dense(units=conditioning_inputs_size[0],
+                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_counterfactual_label_input))
 
     x_counterfactual_conditioning = tf.keras.layers.Concatenate()([x_counterfactual_label])
 
-    for i in range(conditional_dense_layers):
-        x_counterfactual_conditioning = (tf.keras.layers.Dense(units=conditioning_inputs_size[2],
-                                                               kernel_initializer=tf.keras.initializers.orthogonal)
-                                         (x_counterfactual_conditioning))
-        x_counterfactual_conditioning = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                         (x_counterfactual_conditioning))
+    if np.any(conditioning_input_embedding_bools is False):
+        for i in range(conditional_dense_layers):
+            x_counterfactual_conditioning = (
+                tf.keras.layers.Dense(units=conditioning_inputs_size[1],
+                                      kernel_initializer=tf.keras.initializers.orthogonal)
+                (x_counterfactual_conditioning))
+            x_counterfactual_conditioning = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                             (x_counterfactual_conditioning))
 
     filters_len = len(filters)
 
@@ -2239,7 +2286,9 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
                                              strides=(1, 1),
                                              padding="same",
                                              kernel_initializer=tf.keras.initializers.orthogonal)(x_image)
-            x_image = tf.keras.layers.GroupNormalization(groups=8)(x_image)
+            x_image = tf.keras.layers.GroupNormalization(groups=8,
+                                                         center=False,
+                                                         scale=False)(x_image)
 
             x_conditioning_beta = (tf.keras.layers.Dense(units=x_image.shape[-1],
                                                          kernel_initializer=tf.keras.initializers.orthogonal)
@@ -2263,11 +2312,13 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
 
             x_image = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_image)
 
-        x_res = tf.keras.layers.Conv2D(filters=x_image.shape[-1],
-                                       kernel_size=(1, 1),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+        if x_res.shape[-1] != x_image.shape[-1]:
+            x_res = tf.keras.layers.Conv2D(filters=x_image.shape[-1],
+                                           kernel_size=(1, 1),
+                                           strides=(1, 1),
+                                           padding="same",
+                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
         x_image = tf.keras.layers.Add()([x_image, x_res])
 
         x_image = tf.keras.layers.Lambda(einops.rearrange,
@@ -2283,7 +2334,9 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
                                          strides=(1, 1),
                                          padding="same",
                                          kernel_initializer=tf.keras.initializers.orthogonal)(x_image)
-        x_image = tf.keras.layers.GroupNormalization(groups=8)(x_image)
+        x_image = tf.keras.layers.GroupNormalization(groups=8,
+                                                     center=False,
+                                                     scale=False)(x_image)
 
         x_conditioning_beta = (tf.keras.layers.Dense(units=x_image.shape[-1],
                                                      kernel_initializer=tf.keras.initializers.orthogonal)
@@ -2307,19 +2360,19 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
 
         x_image = tf.keras.layers.Lambda(tf.keras.activations.swish)(x_image)
 
-    x_res = tf.keras.layers.Conv2D(filters=x_image.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+    if x_res.shape[-1] != x_image.shape[-1]:
+        x_res = tf.keras.layers.Conv2D(filters=x_image.shape[-1],
+                                       kernel_size=(1, 1),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
     x_image = tf.keras.layers.Add()([x_image, x_res])
 
     if num_heads[-1] is not None and key_dim[-1] is not None:
         x_res = x_image
 
-        x_image = tf.keras.layers.GroupNormalization(groups=1,
-                                                     center=False,
-                                                     scale=False)(x_image)
+        x_image = tf.keras.layers.GroupNormalization(groups=1)(x_image)
 
         x_image_shape = x_image.shape
         x_image_shape_prod = tf.math.reduce_prod(x_image_shape[1:-1]).numpy()
@@ -2329,12 +2382,14 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
                                                  feature_transform="elu")(x_image, x_image)
         x_image = tf.keras.layers.Reshape(target_shape=x_image_shape[1:])(x_image)
 
-        x_image = tf.keras.layers.Conv2D(filters=x_image.shape[-1],
-                                         kernel_size=(1, 1),
-                                         strides=(1, 1),
-                                         padding="same",
-                                         kernel_initializer=tf.keras.initializers.orthogonal)(x_image)
-        x_image = tf.keras.layers.Add()([x_res, x_image])
+        if x_res.shape[-1] != x_image.shape[-1]:
+            x_res = tf.keras.layers.Conv2D(filters=x_image.shape[-1],
+                                           kernel_size=(1, 1),
+                                           strides=(1, 1),
+                                           padding="same",
+                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
+        x_image = tf.keras.layers.Add()([x_image, x_res])
 
     x_image = tf.keras.layers.Conv2D(filters=image_input_latent_size,
                                      kernel_size=(1, 1),
@@ -2354,28 +2409,29 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
-            x = tf.keras.layers.GroupNormalization(groups=8)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8,
+                                                   center=False,
+                                                   scale=False)(x)
 
             conditioning_units = int(np.round(x.shape[-1] / 2.0))
 
-            x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                    kernel_initializer=tf.keras.initializers.orthogonal)
-                                              (x_positional_conditioning))
-            x_positional_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                              (x_positional_conditioning_beta))
-            x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                    kernel_initializer=tf.keras.initializers.orthogonal)
-                                              (x_positional_conditioning_beta))
+            x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                  kernel_initializer=tf.keras.initializers.orthogonal)
+                                            (x_timestep_encoding))
+            x_timestep_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                            (x_timestep_conditioning_beta))
+            x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                  kernel_initializer=tf.keras.initializers.orthogonal)
+                                            (x_timestep_conditioning_beta))
 
-            x_positional_conditioning_gamma = (
-                tf.keras.layers.Dense(units=conditioning_units,
-                                      kernel_initializer=tf.keras.initializers.orthogonal)(x_positional_conditioning))
-            x_positional_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                               (x_positional_conditioning_gamma))
-            x_positional_conditioning_gamma = (
-                tf.keras.layers.Dense(units=conditioning_units,
-                                      kernel_initializer=tf.keras.initializers.orthogonal)
-                (x_positional_conditioning_gamma))
+            x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                   kernel_initializer=tf.keras.initializers.orthogonal)
+                                             (x_timestep_encoding))
+            x_timestep_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                             (x_timestep_conditioning_gamma))
+            x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                   kernel_initializer=tf.keras.initializers.orthogonal)
+                                             (x_timestep_conditioning_gamma))
 
             x_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
                                                          kernel_initializer=tf.keras.initializers.orthogonal)
@@ -2393,10 +2449,9 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
                                                           kernel_initializer=tf.keras.initializers.orthogonal)
                                     (x_conditioning_gamma))
 
-            x_conditioning_beta = tf.keras.layers.Concatenate()([x_positional_conditioning_beta, x_conditioning_beta])
+            x_conditioning_beta = tf.keras.layers.Concatenate()([x_timestep_conditioning_beta, x_conditioning_beta])
 
-            x_conditioning_gamma = tf.keras.layers.Concatenate()([x_positional_conditioning_gamma,
-                                                                  x_conditioning_gamma])
+            x_conditioning_gamma = tf.keras.layers.Concatenate()([x_timestep_conditioning_gamma, x_conditioning_gamma])
             x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
 
             x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
@@ -2404,11 +2459,13 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
 
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                       kernel_size=(1, 1),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+        if x_res.shape[-1] != x.shape[-1]:
+            x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                           kernel_size=(1, 1),
+                                           strides=(1, 1),
+                                           padding="same",
+                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
         x = tf.keras.layers.Add()([x, x_res])
 
         x_skip = x
@@ -2416,9 +2473,7 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
         if num_heads[i] is not None and key_dim[i] is not None:
             x_res = x_skip
 
-            x_skip = tf.keras.layers.GroupNormalization(groups=1,
-                                                        center=False,
-                                                        scale=False)(x_skip)
+            x_skip = tf.keras.layers.GroupNormalization(groups=1)(x_skip)
 
             x_skip_shape = x_skip.shape
             x_skip_shape_prod = tf.math.reduce_prod(x_skip_shape[1:-1]).numpy()
@@ -2428,12 +2483,14 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
                                                     feature_transform="elu")(x_skip, x_skip)
             x_skip = tf.keras.layers.Reshape(target_shape=x_skip_shape[1:])(x_skip)
 
-            x_skip = tf.keras.layers.Conv2D(filters=x_skip.shape[-1],
-                                            kernel_size=(1, 1),
-                                            strides=(1, 1),
-                                            padding="same",
-                                            kernel_initializer=tf.keras.initializers.orthogonal)(x_skip)
-            x_skip = tf.keras.layers.Add()([x_res, x_skip])
+            if x_res.shape[-1] != x_skip.shape[-1]:
+                x_res = tf.keras.layers.Conv2D(filters=x_skip.shape[-1],
+                                               kernel_size=(1, 1),
+                                               strides=(1, 1),
+                                               padding="same",
+                                               kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
+            x_skip = tf.keras.layers.Add()([x_skip, x_res])
 
         x_skips.append(x_skip)
 
@@ -2449,28 +2506,29 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
-        x = tf.keras.layers.GroupNormalization(groups=8)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8,
+                                               center=False,
+                                               scale=False)(x)
 
         conditioning_units = int(np.round(x.shape[-1] / 2.0))
 
-        x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                kernel_initializer=tf.keras.initializers.orthogonal)
-                                          (x_positional_conditioning))
-        x_positional_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                          (x_positional_conditioning_beta))
-        x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                kernel_initializer=tf.keras.initializers.orthogonal)
-                                          (x_positional_conditioning_beta))
+        x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                              kernel_initializer=tf.keras.initializers.orthogonal)
+                                        (x_timestep_encoding))
+        x_timestep_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                        (x_timestep_conditioning_beta))
+        x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                              kernel_initializer=tf.keras.initializers.orthogonal)
+                                        (x_timestep_conditioning_beta))
 
-        x_positional_conditioning_gamma = (
-            tf.keras.layers.Dense(units=conditioning_units,
-                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_positional_conditioning))
-        x_positional_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                           (x_positional_conditioning_gamma))
-        x_positional_conditioning_gamma = (
-            tf.keras.layers.Dense(units=conditioning_units,
-                                  kernel_initializer=tf.keras.initializers.orthogonal)
-            (x_positional_conditioning_gamma))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_timestep_encoding))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                         (x_timestep_conditioning_gamma))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_timestep_conditioning_gamma))
 
         x_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
                                                      kernel_initializer=tf.keras.initializers.orthogonal)
@@ -2488,10 +2546,9 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
                                                       kernel_initializer=tf.keras.initializers.orthogonal)
                                 (x_conditioning_gamma))
 
-        x_conditioning_beta = tf.keras.layers.Concatenate()([x_positional_conditioning_beta, x_conditioning_beta])
+        x_conditioning_beta = tf.keras.layers.Concatenate()([x_timestep_conditioning_beta, x_conditioning_beta])
 
-        x_conditioning_gamma = tf.keras.layers.Concatenate()([x_positional_conditioning_gamma,
-                                                              x_conditioning_gamma])
+        x_conditioning_gamma = tf.keras.layers.Concatenate()([x_timestep_conditioning_gamma, x_conditioning_gamma])
         x_conditioning_gamma = tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)(x_conditioning_gamma)
 
         x = tf.keras.layers.Multiply()([x, x_conditioning_gamma])
@@ -2499,19 +2556,19 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
 
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-    x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+    if x_res.shape[-1] != x.shape[-1]:
+        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                       kernel_size=(1, 1),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
     x = tf.keras.layers.Add()([x, x_res])
 
     if num_heads[-1] is not None and key_dim[-1] is not None:
         x_res = x
 
-        x = tf.keras.layers.GroupNormalization(groups=1,
-                                               center=False,
-                                               scale=False)(x)
+        x = tf.keras.layers.GroupNormalization(groups=1)(x)
 
         x_shape = x.shape
         x_shape_prod = tf.math.reduce_prod(x_shape[1:-1]).numpy()
@@ -2521,12 +2578,14 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
                                            feature_transform="elu")(x, x)
         x = tf.keras.layers.Reshape(target_shape=x_shape[1:])(x)
 
-        x = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x)
-        x = tf.keras.layers.Add()([x_res, x])
+        if x_res.shape[-1] != x.shape[-1]:
+            x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                           kernel_size=(1, 1),
+                                           strides=(1, 1),
+                                           padding="same",
+                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
+        x = tf.keras.layers.Add()([x, x_res])
 
     for i in range(conv_layers[-1]):
         x = tf.keras.layers.Conv2D(filters=filters[-1],
@@ -2534,28 +2593,29 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
                                    strides=(1, 1),
                                    padding="same",
                                    kernel_initializer=tf.keras.initializers.orthogonal)(x)
-        x = tf.keras.layers.GroupNormalization(groups=8)(x)
+        x = tf.keras.layers.GroupNormalization(groups=8,
+                                               center=False,
+                                               scale=False)(x)
 
         conditioning_units = int(np.round(x.shape[-1] / 2.0))
 
-        x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                kernel_initializer=tf.keras.initializers.orthogonal)
-                                          (x_positional_conditioning))
-        x_positional_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                          (x_positional_conditioning_beta))
-        x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                kernel_initializer=tf.keras.initializers.orthogonal)
-                                          (x_positional_conditioning_beta))
+        x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                              kernel_initializer=tf.keras.initializers.orthogonal)
+                                        (x_timestep_encoding))
+        x_timestep_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                        (x_timestep_conditioning_beta))
+        x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                              kernel_initializer=tf.keras.initializers.orthogonal)
+                                        (x_timestep_conditioning_beta))
 
-        x_positional_conditioning_gamma = (
-            tf.keras.layers.Dense(units=conditioning_units,
-                                  kernel_initializer=tf.keras.initializers.orthogonal)(x_positional_conditioning))
-        x_positional_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                           (x_positional_conditioning_gamma))
-        x_positional_conditioning_gamma = (
-            tf.keras.layers.Dense(units=conditioning_units,
-                                  kernel_initializer=tf.keras.initializers.orthogonal)
-            (x_positional_conditioning_gamma))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_timestep_encoding))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                         (x_timestep_conditioning_gamma))
+        x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                               kernel_initializer=tf.keras.initializers.orthogonal)
+                                         (x_timestep_conditioning_gamma))
 
         x_counterfactual_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
                                                                     kernel_initializer=tf.keras.initializers.orthogonal)
@@ -2576,10 +2636,10 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
                                   kernel_initializer=tf.keras.initializers.orthogonal)
             (x_counterfactual_conditioning_gamma))
 
-        x_counterfactual_conditioning_beta = tf.keras.layers.Concatenate()([x_positional_conditioning_beta,
+        x_counterfactual_conditioning_beta = tf.keras.layers.Concatenate()([x_timestep_conditioning_beta,
                                                                             x_counterfactual_conditioning_beta])
 
-        x_counterfactual_conditioning_gamma = tf.keras.layers.Concatenate()([x_positional_conditioning_gamma,
+        x_counterfactual_conditioning_gamma = tf.keras.layers.Concatenate()([x_timestep_conditioning_gamma,
                                                                              x_counterfactual_conditioning_gamma])
         x_counterfactual_conditioning_gamma = (tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)
                                                (x_counterfactual_conditioning_gamma))
@@ -2589,11 +2649,13 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
 
         x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-    x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                   kernel_size=(1, 1),
-                                   strides=(1, 1),
-                                   padding="same",
-                                   kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+    if x_res.shape[-1] != x.shape[-1]:
+        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                       kernel_size=(1, 1),
+                                       strides=(1, 1),
+                                       padding="same",
+                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
     x = tf.keras.layers.Add()([x, x_res])
 
     for i in range(filters_len - 2, -1, -1):
@@ -2618,28 +2680,29 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
                                        strides=(1, 1),
                                        padding="same",
                                        kernel_initializer=tf.keras.initializers.orthogonal)(x)
-            x = tf.keras.layers.GroupNormalization(groups=8)(x)
+            x = tf.keras.layers.GroupNormalization(groups=8,
+                                                   center=False,
+                                                   scale=False)(x)
 
             conditioning_units = int(np.round(x.shape[-1] / 2.0))
 
-            x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                    kernel_initializer=tf.keras.initializers.orthogonal)
-                                              (x_positional_conditioning))
-            x_positional_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                              (x_positional_conditioning_beta))
-            x_positional_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
-                                                                    kernel_initializer=tf.keras.initializers.orthogonal)
-                                              (x_positional_conditioning_beta))
+            x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                  kernel_initializer=tf.keras.initializers.orthogonal)
+                                            (x_timestep_encoding))
+            x_timestep_conditioning_beta = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                            (x_timestep_conditioning_beta))
+            x_timestep_conditioning_beta = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                  kernel_initializer=tf.keras.initializers.orthogonal)
+                                            (x_timestep_conditioning_beta))
 
-            x_positional_conditioning_gamma = (
-                tf.keras.layers.Dense(units=conditioning_units,
-                                      kernel_initializer=tf.keras.initializers.orthogonal)(x_positional_conditioning))
-            x_positional_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
-                                               (x_positional_conditioning_gamma))
-            x_positional_conditioning_gamma = (
-                tf.keras.layers.Dense(units=conditioning_units,
-                                      kernel_initializer=tf.keras.initializers.orthogonal)
-                (x_positional_conditioning_gamma))
+            x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                   kernel_initializer=tf.keras.initializers.orthogonal)
+                                             (x_timestep_encoding))
+            x_timestep_conditioning_gamma = (tf.keras.layers.Lambda(tf.keras.activations.swish)
+                                             (x_timestep_conditioning_gamma))
+            x_timestep_conditioning_gamma = (tf.keras.layers.Dense(units=conditioning_units,
+                                                                   kernel_initializer=tf.keras.initializers.orthogonal)
+                                             (x_timestep_conditioning_gamma))
 
             x_counterfactual_conditioning_beta = (
                 tf.keras.layers.Dense(units=conditioning_units,
@@ -2663,10 +2726,10 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
                                       kernel_initializer=tf.keras.initializers.orthogonal)
                 (x_counterfactual_conditioning_gamma))
 
-            x_counterfactual_conditioning_beta = tf.keras.layers.Concatenate()([x_positional_conditioning_beta,
+            x_counterfactual_conditioning_beta = tf.keras.layers.Concatenate()([x_timestep_conditioning_beta,
                                                                                 x_counterfactual_conditioning_beta])
 
-            x_counterfactual_conditioning_gamma = tf.keras.layers.Concatenate()([x_positional_conditioning_gamma,
+            x_counterfactual_conditioning_gamma = tf.keras.layers.Concatenate()([x_timestep_conditioning_gamma,
                                                                                  x_counterfactual_conditioning_gamma])
             x_counterfactual_conditioning_gamma = (tf.keras.layers.Lambda(lambda x_current: x_current + 1.0)
                                                    (x_counterfactual_conditioning_gamma))
@@ -2676,11 +2739,13 @@ def get_model_conv_alex_image_input(x_train_images, x_timestep_encodings, x_trai
 
             x = tf.keras.layers.Lambda(tf.keras.activations.swish)(x)
 
-        x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
-                                       kernel_size=(1, 1),
-                                       strides=(1, 1),
-                                       padding="same",
-                                       kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+        if x_res.shape[-1] != x.shape[-1]:
+            x_res = tf.keras.layers.Conv2D(filters=x.shape[-1],
+                                           kernel_size=(1, 1),
+                                           strides=(1, 1),
+                                           padding="same",
+                                           kernel_initializer=tf.keras.initializers.orthogonal)(x_res)
+
         x = tf.keras.layers.Add()([x, x_res])
 
     x = tf.keras.layers.Conv2D(filters=image_input_shape[-1],
@@ -2775,39 +2840,39 @@ def translate_image(image):
     translation = random.randint(0, max_translation)
 
     if random.choice([True, False]):
-        translated_image = np.pad(image, ((0, translation), (0, 0), (0, 0)))  # noqa
+        translated_image = np.pad(image, ((0, translation), (0, 0), (0, 0)))
     else:
-        translated_image = np.pad(image, ((translation, 0), (0, 0), (0, 0)))  # noqa
+        translated_image = np.pad(image, ((translation, 0), (0, 0), (0, 0)))
 
     translation = random.randint(0, max_translation)
 
     if random.choice([True, False]):
-        translated_image = np.pad(translated_image, ((0, 0), (0, translation), (0, 0)))  # noqa
+        translated_image = np.pad(translated_image, ((0, 0), (0, translation), (0, 0)))
     else:
-        translated_image = np.pad(translated_image, ((0, 0), (translation, 0), (0, 0)))  # noqa
+        translated_image = np.pad(translated_image, ((0, 0), (translation, 0), (0, 0)))
 
     return translated_image
 
 
-def crop_image(image, output_dimension_size, output_shape=None):
+def crop_image(image, cropped_dimension_size, output_shape=None):
     cropped_image = copy.deepcopy(image)
 
     if output_shape is not None:
-        output_dimension_size = output_shape[0]
+        cropped_dimension_size = output_shape[0]
 
-    while cropped_image.shape[0] - 1 > output_dimension_size:
+    while cropped_image.shape[0] - 1 > cropped_dimension_size:
         cropped_image = cropped_image[1:-1]
 
-    if cropped_image.shape[0] > output_dimension_size:
+    if cropped_image.shape[0] > cropped_dimension_size:
         cropped_image = cropped_image[1:]
 
     if output_shape is not None:
-        output_dimension_size = output_shape[1]
+        cropped_dimension_size = output_shape[1]
 
-    while cropped_image.shape[1] - 1 > output_dimension_size:
+    while cropped_image.shape[1] - 1 > cropped_dimension_size:
         cropped_image = cropped_image[:, 1:-1]
 
-    if cropped_image.shape[1] > output_dimension_size:
+    if cropped_image.shape[1] > cropped_dimension_size:
         cropped_image = cropped_image[:, 1:]
 
     return cropped_image
@@ -2913,7 +2978,7 @@ def output_image(image, original_shape, padding_mask, standard_scaler, current_o
 
     outputted_image = np.reshape(standard_scaler.inverse_transform(np.reshape(outputted_image, (-1, 1))),
                                  outputted_image.shape)
-    outputted_image = np.clip(outputted_image, 0.0, 255.0).astype(np.uint8)
+    outputted_image = np.clip(np.round(outputted_image), 0.0, 255.0).astype(np.uint8)
 
     if greyscale_bool:
         outputted_image = outputted_image[:, :, 0]
@@ -3028,79 +3093,127 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
                                      model.trainable_variables]
 
             current_index = current_batch_size * j
+            current_gradient_accumulation_batch_size = (
+                int(np.floor(current_batch_size / gradient_accumulation_batch_size)))
 
             losses = []
             errors = []
 
-            for m in range(current_batch_size):
-                current_x_train_image = get_data_from_storage(x_train_images[indices[current_index]])
-                current_x_train_original_shape = x_train_original_shapes[indices[current_index]]
-                current_x_train_padding_mask = get_data_from_storage(x_train_padding_masks[indices[current_index]])
+            for k in range(current_gradient_accumulation_batch_size):
+                current_x_train_images = []
+                current_x_train_image_inputs = []
+                current_x_train_padding_masks = []
+                current_x_train_labels = []
 
-                current_x_train_image = augmentation(current_x_train_image, current_x_train_original_shape,
-                                                     current_x_train_padding_mask)
-                current_x_train_image_input = current_x_train_image
+                for n in range(gradient_accumulation_batch_size):
+                    current_x_train_image = get_data_from_storage(x_train_images[indices[current_index]])
+                    current_x_train_original_shape = x_train_original_shapes[indices[current_index]]
+                    current_x_train_padding_mask = get_data_from_storage(x_train_padding_masks[indices[current_index]])
 
-                current_x_train_label = x_train_labels[indices[current_index]]
+                    current_x_train_label = x_train_labels[indices[current_index]]
 
-                current_x_train_image = tf.expand_dims(current_x_train_image, axis=0)
-                current_x_train_image_input = tf.expand_dims(current_x_train_image_input, axis=0)
-                current_x_train_padding_mask = tf.expand_dims(current_x_train_padding_mask, axis=0)
-                current_x_train_label = tf.expand_dims(current_x_train_label, axis=0)
+                    current_x_train_image = augmentation(current_x_train_image, current_x_train_original_shape,
+                                                         current_x_train_padding_mask)
+                    current_x_train_image_input = current_x_train_image
 
-                counterfactual_x_train_label = copy.deepcopy(current_x_train_label)
+                    current_x_train_images.append(current_x_train_image)
+                    current_x_train_image_inputs.append(current_x_train_image_input)
+                    current_x_train_padding_masks.append(current_x_train_padding_mask)
 
-                if len(timesteps) < 1:
-                    timesteps = list(range(number_of_timesteps))
-                    random.shuffle(timesteps)
+                    current_x_train_labels.append(current_x_train_label)
 
-                current_timestep = timesteps.pop(0)
+                    current_index = current_index + 1
 
-                if timestep_encoding_embedding_bool:
-                    current_x_timestep_encoding = tf.convert_to_tensor(current_timestep)
+                current_x_train_images = tf.convert_to_tensor(current_x_train_images)
+                current_x_train_image_inputs = tf.convert_to_tensor(current_x_train_image_inputs)
+                current_x_train_padding_masks = tf.convert_to_tensor(current_x_train_padding_masks)
+                current_x_train_labels = tf.convert_to_tensor(current_x_train_labels)
+
+                counterfactual_x_train_labels = copy.deepcopy(current_x_train_labels)
+
+                current_x_timestep_encodings = []
+
+                if unbatch_bool:
+                    current_x_train_images_with_noise = []
+                    y_true = []
+
+                    for n in range(gradient_accumulation_batch_size):
+                        if len(timesteps) < 1:
+                            timesteps = list(range(number_of_timesteps))
+                            random.shuffle(timesteps)
+
+                        current_timestep = timesteps.pop(0)
+
+                        if timestep_encoding_embedding_bool:
+                            current_x_timestep_encodings.append(current_timestep)
+                        else:
+                            current_x_timestep_encodings.append(x_timestep_encodings[current_timestep])
+
+                        current_x_train_image_with_noise, current_noise = (
+                            forward_noise(tf.expand_dims(current_x_train_images[n], axis=0), current_timestep,
+                                          sqrt_alpha_bar, one_minus_sqrt_alpha_bar))
+
+                        current_x_train_images_with_noise.append(current_x_train_image_with_noise[0])
+                        y_true.append(current_noise[0])
+
+                    current_x_timestep_encodings = tf.convert_to_tensor(current_x_timestep_encodings)
+                    current_x_train_images_with_noise = tf.convert_to_tensor(current_x_train_images_with_noise)
+                    y_true = tf.convert_to_tensor(y_true)
                 else:
-                    current_x_timestep_encoding = x_timestep_encodings[current_timestep]
+                    if len(timesteps) < 1:
+                        timesteps = list(range(number_of_timesteps))
+                        random.shuffle(timesteps)
 
-                current_x_timestep_encoding = tf.expand_dims(current_x_timestep_encoding, axis=0)
+                    current_timestep = timesteps.pop(0)
 
-                current_x_train_image_with_noise, y_true = (
-                    forward_noise(current_x_train_image, current_timestep, sqrt_alpha_bar, one_minus_sqrt_alpha_bar))
+                    if timestep_encoding_embedding_bool:
+                        for n in range(current_batch_size):
+                            current_x_timestep_encodings.append(current_timestep)
+                    else:
+                        for n in range(current_batch_size):
+                            current_x_timestep_encodings.append(x_timestep_encodings[current_timestep])
+
+                    current_x_timestep_encodings = tf.convert_to_tensor(current_x_timestep_encodings)
+
+                    current_x_train_images_with_noise, y_true = (
+                        forward_noise(current_x_train_images, current_timestep, sqrt_alpha_bar,
+                                      one_minus_sqrt_alpha_bar))
 
                 if image_input_bool:
                     if i + 1 > mean_squared_error_epochs:
                         with tf.GradientTape() as tape:
-                            y_pred = model([current_x_train_image_with_noise, current_x_train_image_input,
-                                            current_x_timestep_encoding, current_x_train_label,
-                                            counterfactual_x_train_label], training=True)
+                            y_pred = model([current_x_train_images_with_noise, current_x_train_image_inputs,
+                                            current_x_timestep_encodings, current_x_train_labels,
+                                            counterfactual_x_train_labels], training=True)
 
                             loss = tf.math.reduce_sum([root_mean_squared_error(y_true, y_pred,
-                                                                               current_x_train_padding_mask),
+                                                                               current_x_train_padding_masks),
                                                        tf.math.reduce_sum(model.losses)])
                     else:
                         with tf.GradientTape() as tape:
-                            y_pred = model([current_x_train_image_with_noise, current_x_train_image_input,
-                                            current_x_timestep_encoding, current_x_train_label,
-                                            counterfactual_x_train_label], training=True)
+                            y_pred = model([current_x_train_images_with_noise, current_x_train_image_inputs,
+                                            current_x_timestep_encodings, current_x_train_labels,
+                                            counterfactual_x_train_labels], training=True)
 
                             loss = tf.math.reduce_sum([mean_squared_error(y_true, y_pred,
-                                                                          current_x_train_padding_mask),
+                                                                          current_x_train_padding_masks),
                                                        tf.math.reduce_sum(model.losses)])
                 else:
                     if i + 1 > mean_squared_error_epochs:
                         with tf.GradientTape() as tape:
-                            y_pred = model([current_x_train_image_with_noise, current_x_timestep_encoding,
-                                            current_x_train_label, counterfactual_x_train_label], training=True)
+                            y_pred = model([current_x_train_images_with_noise, current_x_timestep_encodings,
+                                            current_x_train_labels, counterfactual_x_train_labels], training=True)
 
                             loss = tf.math.reduce_sum([root_mean_squared_error(y_true, y_pred,
-                                                                               current_x_train_padding_mask),
+                                                                               current_x_train_padding_masks),
                                                        tf.math.reduce_sum(model.losses)])
                     else:
                         with tf.GradientTape() as tape:
-                            y_pred = model([current_x_train_image_with_noise, current_x_timestep_encoding,
-                                            current_x_train_label, counterfactual_x_train_label], training=True)
+                            y_pred = model([current_x_train_images_with_noise, current_x_timestep_encodings,
+                                            current_x_train_labels, counterfactual_x_train_labels], training=True)
 
                             loss = tf.math.reduce_sum([mean_squared_error(y_true, y_pred,
-                                                                          current_x_train_padding_mask),
+                                                                          current_x_train_padding_masks),
                                                        tf.math.reduce_sum(model.losses)])
 
                 gradients = tape.gradient(loss, model.trainable_weights)
@@ -3109,9 +3222,7 @@ def train_gradient_accumulation(model, optimiser, batch_sizes, batch_sizes_epoch
                                          zip(accumulated_gradients, gradients)]
 
                 losses.append(loss)
-                errors.append(get_error(y_true, y_pred, current_x_train_padding_mask))
-
-                current_index = current_index + 1
+                errors.append(get_error(y_true, y_pred, current_x_train_padding_masks))
 
             gradients = [gradient / current_batch_size for gradient in accumulated_gradients]
             gradients, _ = tf.clip_by_global_norm(gradients, 1.0)
@@ -3390,7 +3501,7 @@ def main():
     x_train_images, x_test_images, x_train_labels, x_test_labels = get_input()
     x_timestep_encodings = get_positional_encodings(number_of_timesteps)
     (x_train_images, x_train_original_shapes, x_train_padding_masks, x_test_images, x_test_original_shapes,
-     x_test_padding_masks, standard_scaler, x_timestep_encodings, x_train_labels, x_test_labels) = (
+     x_test_padding_masks, standard_scaler, x_timestep_encodings, x_train_labels, x_test_labels, preprocessors) = (
         preprocess_input(x_train_images, x_test_images, x_timestep_encodings, x_train_labels, x_test_labels))
 
     if alex_bool:
