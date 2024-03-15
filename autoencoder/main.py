@@ -128,7 +128,7 @@ else:
     discrete_mean_squared_error_epochs = 0
     mean_squared_error_epochs = epochs
 
-gaussian_latent_loss_weight = 1e-01
+gaussian_latent_loss_weight = 1e-02
 
 
 def mkdir_p(path):
